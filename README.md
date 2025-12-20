@@ -3,6 +3,8 @@
 A deterministic, real-time–capable external ballistics simulation designed for **high-fidelity game development**.  
 The goal is to achieve **realistic long-range bullet behavior** (600–1500+ yards and beyond) using a **computationally efficient pseudo–6-DOF model**, with a clean upgrade path to full 6-DOF if ever required.
 
+Initial development to be done using **Python 3**.
+
 This project prioritizes:
 - Physical correctness where it matters perceptually
 - Determinism and performance
@@ -39,13 +41,10 @@ This engine models **translation only (3-DOF)** while injecting **spin- and wind
 - Spin drift (RH/LH twist)
 - Magnus lift
 - Atmospheric density & Mach effects
-- Coriolis (optional)
-- Deterministic RK4 integration
+- Coriolis effect
+- RK4 integration
 
-### Possible Expansions (in near-term)
-- Pseudo-random perturbations/scattering
-
-### Explicitly Excluded (for now)
+### Excluded
 - Bullet tumbling / instability
 - Full angular state (quaternions, inertia tensors)
 - Interior ballistics (chamber pressure, burn rate)
