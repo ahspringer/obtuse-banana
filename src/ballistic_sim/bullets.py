@@ -84,8 +84,8 @@ class Bullet:
         :param initial_pos: (optional) Bullet originating position in [x, y, z] array (m) 
         :param initial_orientation: (optional) Bullet originating position in [roll, pitch, yaw] relative to GLOBAL ORIGIN (deg) 
         """
-        self.m = mass / 1000  # kg
-        self.d = diameter  / 1000  # m
+        self.m = mass * 1000  # kg
+        self.d = diameter  * 1000  # m
         self.area = np.pi * (diameter / 2)**2  # m^2
         self.bc_g7 = bc_g7
         self.env = environment
@@ -98,6 +98,7 @@ class Bullet:
         self.Cm_alpha = 4.5  # Overturning moment derivative
         self.C_mag = 0.03    # Magnus coefficient (approximate)
         self.k_spin = 0.00005  # Approximated damping factor
+        self.form_factor = (self.m / (self.d**2)) / (self.bc_g7 * 703.07)
 
         # Initial State Setup
         if initial_pos is None:
@@ -115,24 +116,53 @@ class Bullet:
         self.state = np.array([initial_pos[0], initial_pos[1], initial_pos[2],
                                vx, vy, vz, spin], dtype=float)
 
-        # Print initial state
-        print(f'Initial state:\n\tx={self.state[0]}\n\ty={self.state[1]}\n\tz={self.state[2]}\n\tvx={self.state[3]}\n\tvy={self.state[4]}\n\tvz={self.state[5]}\n\tspin={self.state[6]}')
-        
+        # Print initial state 
+        self.print_state()
+
         self.history = [self.state.copy()]
 
         self.status = 0  # 0 = In-flight; 1 = hit target; 2 = hit ground
     
     def get_drag_coefficient(self, mach):
-        # Rough approximation of G7 Cd tables
-        # TODO: Implement proper lookup table
-        if mach < 0.9:
-            return 0.26
-        elif mach < 1.0:
-            return 0.26 + (mach - 0.9) * 2.0 # Transonic spike
-        elif mach < 4.0:
-            return 0.45 / (mach**0.2) # Supersonic decay
+        """
+        An improved analytical approximation of the G7 drag curve.
+        This model accounts for the sharp rise at Mach 0.8 and the 
+        peak slightly past Mach 1.
+        """
+        # 1. Base G7 Standard Projectile Drag Curve (Standard C_g7)
+        if mach <= 0.80:
+            # Subsonic: Fairly flat drag
+            c_g7 = 0.22
+        elif mach <= 1.05:
+            # Transonic rise: Cubic-style ramp up
+            # At 0.8 -> 0.22 | At 1.05 -> ~0.41
+            c_g7 = 0.22 + 0.75 * (mach - 0.8)**2
+        elif mach <= 1.5:
+            # Transonic peak and early supersonic decay
+            # Peaks near Mach 1.1 (~0.42) then starts dropping
+            c_g7 = 0.42 - 0.28 * (mach - 1.05)**0.5
+        elif mach <= 5.0:
+            # Supersonic decay: Classic power law decay
+            # Most bullets follow a mach^-0.4 to mach^-0.6 decay here
+            c_g7 = 0.35 / (mach**0.55)
         else:
-            return 0.30
+            # Hypersonic plateau
+            c_g7 = 0.15
+
+        # 2. Scale by Form Factor (i)
+        # The G7 BC is defined as Sectional_Density / Form_Factor
+        # Form Factor i = SD / BC
+        # For a .338 300gr with BC 0.40, i is roughly 0.95-1.05
+        
+        # Calculate Sectional Density (lb/in^2 converted to kg/m^2 logic)
+        # Or more simply, if the user provided BC_G7:
+        # i = (mass_kg / (diameter_m^2)) / (BC_G7_lb_in2 * 703.07)
+        
+        # If you haven't calculated 'self.form_factor' in __init__, 
+        # you can do it once there:
+        # self.form_factor = (self.m / (self.d**2)) / (self.bc_g7 * 703.07)
+        
+        return c_g7 * self.form_factor
     
     def _calculate_forces(self, state=None):
         """
@@ -141,14 +171,10 @@ class Bullet:
         :param state: (optional) a state to calculate from for RK4 integration
         """
         # Unpack state
-        if state is None:
-            pos = self.state[0:3]
-            u = self.state[3:6]     # ground velocity (m/s)
-            p = self.state[6]       # spin rate (rad/s)
-        else:
-            pos = state[0:3]
-            u = state[3:6]     # ground velocity (m/s)
-            p = state[6]       # spin rate (rad/s)
+        work_state = state if state is not None else self.state
+        pos = work_state[0:3]
+        u = work_state[3:6]     # ground velocity (m/s)
+        p = work_state[6]       # spin rate (rad/s)
 
         u_mag = np.linalg.norm(u)
         if u_mag < 1e-5: return np.zeros(7)  # Bullet isn't moving
@@ -157,7 +183,7 @@ class Bullet:
         # 1. Air Velocity
         v_air = self.env.relative_air_velocity(u)
         v_air_mag = np.linalg.norm(v_air)
-        v_air_hat = v_air / v_air_mag
+        v_air_hat = v_air / (v_air_mag + 1e-9)
 
         # 2. Mach Number
         mach = self.env.mach_number(u)
@@ -180,11 +206,11 @@ class Bullet:
         # -- MAGNUS EFFECT --
         # Assumption: spin axis aligned with ground-velocity (no wobble or yaw)
         magnus_dir = np.cross(u_hat, v_air_hat)
-        spin_param = (p * self.d) / v_air_mag  # non-dimensional spin parameter
+        spin_param = (p * self.d) / (v_air_mag + 1e-9)  # non-dimensional spin parameter
         F_magnus = q * self.area * self.C_mag * spin_param * magnus_dir
 
         # -- TOTAL FORCES --
-        F_total = F_drag + F_lift_repose + F_magnus + (self.m * self.env.g_m_s2)
+        F_total = F_drag + F_lift_repose + F_magnus + np.dot(self.m, [0, 0, self.env.g_m_s2])
 
         # -- SPIN DECAY --
         # Simple exponential decay due to skin friction
@@ -217,7 +243,7 @@ class Bullet:
             self.env = env
         
         # Stop calculations if bullet hits ground (z < ground)
-        if self.state[2] < env.ground:
+        if self.state[2] > env.ground:
             self.state = [self.state[0], self.state[1], self.state[2], 0, 0, 0, 0]
             self.history.append(self.state.copy())
             self.status = 2  # Hit ground
@@ -237,4 +263,5 @@ class Bullet:
         self.history.append(self.state.copy())
 
     def print_state(self):
-        print(f'BULLET STATE:\n\tx = {self.state[0]}')
+        print(f'BULLET STATE:\n\tx={self.state[0]}\n\ty={self.state[1]}\n\tz={self.state[2]}\n\tvx={self.state[3]}\n\tvy={self.state[4]}\n\tvz={self.state[5]}\n\tspin={self.state[6]}')
+       

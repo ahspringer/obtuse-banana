@@ -63,8 +63,8 @@ def run_simulation(environment, bullet, target, dt=0.001, max_time=15.0):
         
         t += dt  # Step to the next time
         print(t)
-        bullet.print_state()
-        return
+        # bullet.print_state()
+        # return bullet, result
         
     # If simulation runs out of time
     result['status'] = 'TIMEOUT'
@@ -116,10 +116,11 @@ if __name__ == "__main__":
                        muzzle_vel=2700,
                        twist_rate=twist_rate_convert(10),
                        environment=environment,
-                       initial_pos=[0, 0, 5],
+                       initial_pos=[0, 0, -5],
                        initial_orientation=[0, 0, 0])
     
     bullet, result = run_simulation(environment=environment,
                                     bullet=bullet308,
                                     target=target)
     print(result)
+    bullet.print_state()

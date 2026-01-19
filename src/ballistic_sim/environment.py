@@ -170,7 +170,8 @@ class Target:
         """
         target_x = self.position[0]
         curr_x = bullet.state[0]
-        prev_x = bullet.history[-1][0]
+        prev_x = bullet.history[-2][0]
+        print('curr_x', curr_x, 'prev_x', prev_x)
         status = 0  # Bullet has not yet reached target
         dy = 0
         dz = 0
