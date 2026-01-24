@@ -64,9 +64,6 @@ def run_simulation(environment, bullet, target, dt=0.001, max_time=15.0):
             return bullet, result
         
         t += dt  # Step to the next time
-        # print(t)
-        # bullet.print_state()
-        # return bullet, result
         
     # If simulation runs out of time
     result['status'] = 'TIMEOUT'
@@ -258,7 +255,5 @@ if __name__ == "__main__":
                                     dt=0.001)
     print(result)
     bullet.print_state()
-
-    # print(bullet.history)
 
     plot_trajectory(bullet, target, dt=0.001)
