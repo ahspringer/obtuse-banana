@@ -169,6 +169,9 @@ class Target:
         """
         self.position = np.array((x, y, z))
         self.radius = radius
+        self.has_been_hit = False
+        self.dy_at_hit = None
+        self.dz_at_hit = None
 
     def check_interaction(self, bullet):
         """
@@ -204,6 +207,9 @@ class Target:
 
             if miss_dist <= self.radius:
                 status = 1  # HIT
+                self.has_been_hit = True
+                self.dy_at_hit = dy
+                self.dz_at_hit = dz
             else:
                 status = -1  # MISS
 

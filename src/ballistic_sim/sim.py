@@ -198,10 +198,16 @@ def plot_trajectory(bullet, target, dt):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.show()
 
-def plot_target_impact(target, dy, dz):
+def plot_target_impact(target):
     """
     Shows the 'bullet hole' on the target face (Y-Z plane).
     """
+    if not target.has_been_hit:
+        print("No hit recorded on target; cannot plot impact.")
+        return
+    else:
+        dy = target.dy_at_hit
+        dz = target.dz_at_hit
     fig, ax = plt.subplots(figsize=(7, 7))
     
     target_circle = plt.Circle((0, 0), target.radius, color='black', fill=False, linewidth=3)
@@ -257,3 +263,4 @@ if __name__ == "__main__":
     bullet.print_state()
 
     plot_trajectory(bullet, target, dt=0.001)
+    plot_target_impact(target)
