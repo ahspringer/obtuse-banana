@@ -13,8 +13,12 @@ class Environment:
     """
     Aerodynamic environment model based on altitude and temperature condition.
 
-    Coordinate-agnostic; provides scalar atmospheric properties for use
-    in external force models (drag, Magnus, etc.).
+    GLOBAL COORDINATE SYSTEM:
+            +X = Downrange
+            +Y = Right
+            +Z = Down
+    
+    Provides scalar atmospheric properties for use in external force models (drag, Magnus, etc.).
 
     Assumptions:
     - ISA troposphere
@@ -44,71 +48,72 @@ class Environment:
         wind_m_s : array-like, optional
             Static wind vector in global frame [wx, wy, wz] (m/s)
         """
-
-        self.altitude_m = altitude_m
+        # Set ref_altitude as the height of the Z=0 plane above Sea Level
+        self.ref_altitude_m = altitude_m
         self.temperature_condition = temperature.lower()
         self.ground = ground
+        self.g_m_s2 = self.g
 
+        # Wind: [wx, wy, wz]
         self.wind_m_s = np.zeros(3) if wind_m_s is None else np.asarray(wind_m_s, dtype=float)
 
         self._validate_inputs()
 
-        # Compute atmospheric state
-        self.temperature_K = self._compute_temperature()
-        self.pressure_Pa = self._compute_pressure()
-        self.density_kg_m3 = self._compute_density()
-        self.speed_of_sound_m_s = self._compute_speed_of_sound()
-
-        # misc
-        self.g_m_s2 = self.g  # m/s^2
+        # Compute initial atmospheric state at Z=0 (origination plane)
+        # self.temperature_K = self._compute_temperature()
+        # self.pressure_Pa = self._compute_pressure()
+        self.density_kg_m3 = self._compute_density(0)
+        self.speed_of_sound_m_s = self._compute_speed_of_sound(0)
 
     def _validate_inputs(self):
         if self.temperature_condition not in ["cold", "standard", "hot"]:
             raise ValueError("temperature must be 'cold', 'standard', or 'hot'")
 
-        if self.altitude_m < -500:
+        if self.ref_altitude_m > 500:
             raise ValueError("Altitude below -500 m not supported")
         
         if self.wind_m_s.shape != (3,):
             raise ValueError("wind_m_s must be a 3-element vector [wx, wy, wz]")
 
+    def get_altitude_MSL(self, z):
+        """
+        Converts local Z coordinate to Altitude above MSL
+        """
+        # Since +Z is down, altitude = ref - Z
+        # Example: Ref=500m ASL, Bullet Z=-100 (up). Altitude = 500 - (-100) = 600m.
+        return self.ref_altitude_m - z
+
     # -- Atmospherics --
 
-    def _compute_temperature(self) -> float:
+    def _compute_temperature(self, z: float = 0.0) -> float:
         """
         Temperature with ISA lapse rate and offset.
         """
-        T_isa = self.T0 + self.L * self.altitude_m
+        T_isa = self.T0 + self.L * self.get_altitude_MSL(z)
+        if self.temperature_condition == "cold": return T_isa - 10.0
+        elif self.temperature_condition == "hot": return T_isa + 15.0
+        else: return T_isa
 
-        # Temperature offsets (engineering typical)
-        if self.temperature_condition == "cold":
-            return T_isa - 10.0
-        elif self.temperature_condition == "hot":
-            return T_isa + 15.0
-        else:
-            return T_isa
-
-    def _compute_pressure(self) -> float:
+    def _compute_pressure(self, z: float = 0.0) -> float:
         """
         Pressure from hydrostatic equation (ISA troposphere).
         """
         T0 = self.T0
         L = self.L
-        h = self.altitude_m
+        h = self.get_altitude_MSL(z)
+        return self.P0 * (1 - L * h / T0) ** (self.g / (self.R * L))
 
-        return self.P0 * (1 + L * h / T0) ** (-self.g / (self.R * L))
-
-    def _compute_density(self) -> float:
+    def _compute_density(self, z: float = 0.0) -> float:
         """
         Density from ideal gas law.
         """
-        return self.pressure_Pa / (self.R * self.temperature_K)
+        return self._compute_pressure(z) / (self.R * self._compute_temperature(z))
     
-    def _compute_speed_of_sound(self) -> float:
+    def _compute_speed_of_sound(self, z: float = 0.0) -> float:
         """
         Speed of sound of ideal gas (air)
         """
-        return np.sqrt(self.gamma * self.R * self.temperature_K)
+        return np.sqrt(self.gamma * self.R * self._compute_temperature(z))
 
     # -- Wind utilities --
 
@@ -125,24 +130,24 @@ class Environment:
 
         return body_velocity_m_s - self.wind_m_s
 
-    def mach_number(self, body_velocity_m_s: np.ndarray) -> float:
+    def mach_number(self, body_velocity_m_s: np.ndarray, z: float = 0.0) -> float:
         """
         Mach number based on air-relative velocity magnitude.
         """
         v_rel = self.relative_air_velocity(body_velocity_m_s)
-        return np.linalg.norm(v_rel) / self.speed_of_sound_m_s
+        return np.linalg.norm(v_rel) / self._compute_speed_of_sound(z)
 
-    def summary(self) -> dict:
+    def summary(self, z: float = 0.0) -> dict:
         """
         Returns a dictionary of environment properties.
         """
         return {
-            "altitude_m": self.altitude_m,
+            "ref_altitude_m": self.ref_altitude_m,
             "temperature_condition": self.temperature_condition,
-            "temperature_K": self.temperature_K,
-            "pressure_Pa": self.pressure_Pa,
-            "density_kg_m3": self.density_kg_m3,
-            "speed_of_sound_m_s": self.speed_of_sound_m_s,
+            "temperature_K": self._compute_temperature(z),
+            "pressure_Pa": self._compute_pressure(z),
+            "density_kg_m3": self._compute_density(z),
+            "speed_of_sound_m_s": self._compute_speed_of_sound(z),
             "wind_m_s": self.wind_m_s.copy()
         }
 
@@ -150,6 +155,11 @@ class Target:
     def __init__(self, x=1000.0, y=0, z=0, radius=0.5):
         """
         Docstring for Target
+
+        GLOBAL COORDINATE SYSTEM:
+            +X = Downrange
+            +Y = Right
+            +Z = Down
         
         :param self: self
         :param x: Target location in X direction (m)
@@ -171,7 +181,7 @@ class Target:
         target_x = self.position[0]
         curr_x = bullet.state[0]
         prev_x = bullet.history[-2][0]
-        print('curr_x', curr_x, 'prev_x', prev_x)
+        # print('curr_x', curr_x, 'prev_x', prev_x)
         status = 0  # Bullet has not yet reached target
         dy = 0
         dz = 0
@@ -185,8 +195,8 @@ class Target:
             else:
                 fraction = (target_x - prev_x) / (curr_x - prev_x)
             
-            impact_y = bullet.history[-1][1] + fraction * (bullet.state[1] - bullet.history[-1][1])
-            impact_z = bullet.history[-1][2] + fraction * (bullet.state[2] - bullet.history[-1][2])
+            impact_y = bullet.history[-2][1] + fraction * (bullet.state[1] - bullet.history[-2][1])
+            impact_z = bullet.history[-2][2] + fraction * (bullet.state[2] - bullet.history[-2][2])
 
             dy = impact_y - self.position[1]
             dz = impact_z - self.position[2]

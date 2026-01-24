@@ -84,21 +84,12 @@ class Bullet:
         :param initial_pos: (optional) Bullet originating position in [x, y, z] array (m) 
         :param initial_orientation: (optional) Bullet originating position in [roll, pitch, yaw] relative to GLOBAL ORIGIN (deg) 
         """
-        self.m = mass * 1000  # kg
-        self.d = diameter  * 1000  # m
-        self.area = np.pi * (diameter / 2)**2  # m^2
+        self.m = mass / 1000  # kg
+        self.d = diameter  / 1000  # m
+        self.area = np.pi * (self.d / 2)**2  # m^2
         self.bc_g7 = bc_g7
         self.env = environment
         self.ground_alt = 0  # Ground clamped to 0 in z-axis
-
-        # Stability / Aerodynamic constants (Estimated for standard spitzer projectiles)
-        self.Cx = 0.5 * self.env.density_kg_m3 * self.area # Drag reference area factor
-        self.Ix = 0.5 * mass * (diameter/2)**2     # Approx axial moment of inertia
-        self.Cl_alpha = 2.0  # Lift slope derivative
-        self.Cm_alpha = 4.5  # Overturning moment derivative
-        self.C_mag = 0.03    # Magnus coefficient (approximate)
-        self.k_spin = 0.00005  # Approximated damping factor
-        self.form_factor = (self.m / (self.d**2)) / (self.bc_g7 * 703.07)
 
         # Initial State Setup
         if initial_pos is None:
@@ -116,7 +107,18 @@ class Bullet:
         self.state = np.array([initial_pos[0], initial_pos[1], initial_pos[2],
                                vx, vy, vz, spin], dtype=float)
 
+        # Stability / Aerodynamic constants (Estimated for standard spitzer projectiles)
+        env_vars = self.env.summary(z=self.state[2])
+        self.Cx = 0.5 * env_vars['density_kg_m3'] * self.area # Drag reference area factor
+        self.Ix = 0.5 * self.m * (self.d/2)**2     # Approx axial moment of inertia
+        self.Cl_alpha = 2.0  # Lift slope derivative
+        self.Cm_alpha = 5.0  # Overturning moment derivative
+        self.C_mag = 0.03    # Magnus coefficient (approximate)
+        self.k_spin = 0.00005  # Approximated damping factor
+        self.form_factor = (self.m / (self.d**2)) / (self.bc_g7 * 703.07)
+
         # Print initial state 
+        print('BULLET INITIALIZED...')
         self.print_state()
 
         self.history = [self.state.copy()]
@@ -173,8 +175,9 @@ class Bullet:
         # Unpack state
         work_state = state if state is not None else self.state
         pos = work_state[0:3]
+        z = pos[-1]
         u = work_state[3:6]     # ground velocity (m/s)
-        p = work_state[6]       # spin rate (rad/s)
+        p = work_state[-1]       # spin rate (rad/s)
 
         u_mag = np.linalg.norm(u)
         if u_mag < 1e-5: return np.zeros(7)  # Bullet isn't moving
@@ -183,30 +186,46 @@ class Bullet:
         # 1. Air Velocity
         v_air = self.env.relative_air_velocity(u)
         v_air_mag = np.linalg.norm(v_air)
-        v_air_hat = v_air / (v_air_mag + 1e-9)
+        v_air_hat = v_air / (v_air_mag + 1e-12)
 
         # 2. Mach Number
-        mach = self.env.mach_number(u)
+        mach = self.env.mach_number(u, z)
 
         # 3. Dynamic Pressure
-        q = 0.5 * self.env.density_kg_m3 * self.area * v_air_mag**2
+        q = 0.5 * self.env._compute_density(z) * self.area * v_air_mag**2
 
         # -- DRAG FORCE --
         Cd = self.get_drag_coefficient(mach)
-        F_drag = -0.5 * self.env.density_kg_m3 * self.area * Cd * v_air_mag * v_air
+        F_drag = -0.5 * self.env._compute_density(z) * self.area * Cd * v_air_mag * v_air
 
         # -- YAW OF REPOSE --
-        g_cross_u = np.cross([0, 0, self.env.g_m_s2], u)
-        denom_repose = (self.env.density_kg_m3 * self.area * self.d * (u_mag**4) * self.Cm_alpha) + 1e-9
-        alpha_repose_vec = (2 * self.Ix * p * g_cross_u) / denom_repose
-
-        # Lift due to repose
+        # Equilibrium yaw results from the gyroscopic response to gravity-induced curvature.
+        g_vec = np.array([0, 0, self.env.g_m_s2])
+        
+        # M_ot: Overturning Moment (Aerodynamic)
+        # M_ot = q * d * area * Cm_alpha
+        M_ot = q * self.d * self.Cm_alpha + 1e-12
+        
+        # Curvature of the trajectory (theta_dot) is approximately g_perp / v
+        # We find the component of gravity perpendicular to the air velocity
+        g_perp = g_vec - np.dot(g_vec, v_air_hat) * v_air_hat
+        
+        # The Yaw of Repose vector (angular)
+        # alpha_repose = (Ix * p * omega_v) / M_ot
+        # Where omega_v is the angular velocity of the velocity vector (v_hat_dot)
+        v_hat_dot = g_perp / (v_air_mag + 1e-12)
+        
+        # For a right-hand twist (p > 0), the nose points to the right of the velocity vector.
+        # This is a gyroscopic precession 90 degrees to the "push" of gravity.
+        alpha_repose_vec = (self.Ix * p * np.cross(v_air_hat, v_hat_dot)) / M_ot
+        
+        # Lift due to repose: F_L = q * Cl_alpha * alpha_repose
         F_lift_repose = q * self.Cl_alpha * alpha_repose_vec
 
         # -- MAGNUS EFFECT --
         # Assumption: spin axis aligned with ground-velocity (no wobble or yaw)
         magnus_dir = np.cross(u_hat, v_air_hat)
-        spin_param = (p * self.d) / (v_air_mag + 1e-9)  # non-dimensional spin parameter
+        spin_param = (p * self.d) / (v_air_mag + 1e-12)  # non-dimensional spin parameter
         F_magnus = q * self.area * self.C_mag * spin_param * magnus_dir
 
         # -- TOTAL FORCES --
