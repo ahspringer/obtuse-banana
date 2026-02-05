@@ -242,7 +242,7 @@ if __name__ == "__main__":
     print("--- Starting EKF Fusion ---")
     
     # Fake time steps
-    for t in range(5):
+    for t in range(20):
         dt = 0.1
         
         # PREDICT (IMU Integration would happen here)
