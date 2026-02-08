@@ -6,9 +6,6 @@ from typing import Callable, Tuple, Optional, List
 -------------------------------------------------------------------------------
 OBJECT ORIENTED EXTENDED KALMAN FILTER (EKF) FRAMEWORK
 -------------------------------------------------------------------------------
-Author: Jarvis (Model)
-Context: Modular Sensor Fusion for Navigation
-
 Architecture:
 1. State:           Holds the 'Truth' (x) and Uncertainty (P).
 2. SystemModel:     Defines how the system moves (Physics/Kinetics).
