@@ -1,11 +1,62 @@
 import matplotlib.pyplot as plt
 import numpy as np
-from IMU import Accelerometer3Axis, GyroscopeQuaternion
-from inclinometers import Inclinometer2Axis
-from GNSS import GNSSReceiver
-import util
+from pathlib import Path
+import sys
+from datetime import datetime
+import pandas as pd
 
-def sim():
+sys.path.append(str(Path(__file__).parent.parent))  # Add project root to path
+
+from src.sensors import Accelerometer3Axis, GyroscopeQuaternion, Inclinometer2Axis
+from src.util import dcm_from_euler, quat_from_dcm, euler_from_dcm
+
+"""
+SENSOR SIMULATION COORDINATE SYSTEM:
+    +X = Downrange
+    +Y = Right (starboard)
+    +Z = Down
+
+All positions, velocities, and accelerations follow this convention.
+Gravity points in the +Z direction (downward).
+"""
+
+SAVE_DIR = Path(r".\examples\images")
+SAVE_DIR.mkdir(exist_ok=True)
+
+DATA_DIR = Path(r".\examples\data")
+DATA_DIR.mkdir(exist_ok=True)
+
+
+def sensor_data_sim():
+    # Initialize sensors
+    accel = Accelerometer3Axis(
+        sensor_id="accel_main",
+        white_noise_std=np.array([0.02, 0.02, 0.02]),
+        initial_bias=np.array([0.03, -0.02, 0.01]),
+        seed=42
+    )
+
+    gyro_quat = GyroscopeQuaternion(
+        sensor_id="gyro_quat",
+        initial_quaternion=[1.0, 0.0, 0.0, 0.0],
+        white_noise_std=np.array([0.001, 0.001, 0.001]),
+        quaternion_noise_std=0.01,
+        seed=42
+    )
+
+    inclin = Inclinometer2Axis(
+        sensor_id="inclinometer",
+        white_noise_std=np.array([0.02, 0.02]),
+        seed=42
+    )
+
+    # Simulation parameters
+    dt = 1/400  # 400 Hz
+    total_duration = 20.0  # 20 seconds of static motion
+    n_steps = int(total_duration / dt)
+
+    print(f"\nSimulating {total_duration} seconds at {1/dt:.0f} Hz ({n_steps} steps)...")
+
     # Storage arrays
     time_array = np.zeros(n_steps)
     accel_true = np.zeros((n_steps, 3))
@@ -15,11 +66,7 @@ def sim():
     inclin_true = np.zeros((n_steps, 2))  # [pitch, roll]
     inclin_measured = np.zeros((n_steps, 2))
     euler_true = np.zeros((n_steps, 3))  # [roll, pitch, yaw]
-    gps_pos_true = np.zeros((n_steps, 3))  # [x, y, z] in meters
-    gps_pos_measured = np.zeros((n_steps, 3))
-    gps_vel_true = np.zeros((n_steps, 3))  # [vx, vy, vz]
-    gps_vel_measured = np.zeros((n_steps, 3))
-    gps_measurement_count = [0]  # Track number of valid GPS updates
+
 
     # Simulation loop
     for i in range(n_steps):
@@ -30,7 +77,8 @@ def sim():
             print(f"Simulating time: {t:.2f} seconds", end='\r')
         
         # TRUE MOTION: No movement, flat orientation (roll=0, pitch=0, yaw=0)
-        position_true = np.array([0.0, 0.0, 1.0])  # x, y, z (meters); z = altitude
+        # COORDINATE SYSTEM: +X is downrange, +Y is right, +Z is down
+        position_true = np.array([0.0, 0.0, -1.0])  # x, y, z (meters); z=-1 means 1m above reference (negative Z is up)
         velocity_true = np.array([0.0, 0.0, 0.0])  # vx, vy, vz (m/s); no movement
         roll = 0.0
         pitch = 0.0
@@ -44,17 +92,18 @@ def sim():
                 pitch = np.radians(10.0)
         
         # Build DCM from Euler angles using util function
-        dcm = util.dcm_from_euler(roll, pitch, yaw)
+        dcm = dcm_from_euler(roll, pitch, yaw)
         
         # Store true Euler angles
         euler_true[i] = np.array([roll, pitch, yaw])
         
         # Convert true Euler to quaternion
-        quat_true[i] = util.quat_from_dcm(dcm)
+        quat_true[i] = quat_from_dcm(dcm)
         
         # True acceleration (assume static, gravity is only acceleration)
         acceleration_body = np.array([0.0, 0.0, 0.0])
         alpha = np.zeros(3)  # No angular acceleration
+        # Gravity vector in the global frame (+Z is down, so gravity points in +Z direction)
         gravity_ned = np.array([0.0, 0.0, 9.81])
         
         # Compute specific force (what accelerometer measures before noise)
@@ -70,24 +119,8 @@ def sim():
 
         # True inclinometer reading: extract Euler angles from DCM and
         # store as [pitch, roll] to match the sensor's output ordering.
-        roll_true, pitch_true, yaw_true = util.euler_from_dcm(dcm)
+        roll_true, pitch_true, yaw_true = euler_from_dcm(dcm)
         inclin_true[i] = np.array([pitch_true, roll_true])
-        
-        # True position and velocity (stationary at origin)
-        gps_pos_true[i] = position_true
-        gps_vel_true[i] = velocity_true
-        
-        # Measure with GPS (lower update rate handled internally)
-        gps_result = gnss.step_from_truth(position_true, velocity_true, dt, t)
-        if gps_result is not None:
-            gps_pos_measured[i] = gps_result[0:3]
-            gps_vel_measured[i] = gps_result[3:6]
-            gps_measurement_count[0] += 1
-        else:
-            # Propagate last valid measurement if available
-            if i > 0:
-                gps_pos_measured[i] = gps_pos_measured[i-1]
-                gps_vel_measured[i] = gps_vel_measured[i-1]
 
     print(f"Simulation complete: {n_steps} steps")
 
@@ -95,7 +128,8 @@ def sim():
     # PLOTTING
     # ===========================================================================
 
-    fig = plt.figure(figsize=(20, 16))
+    fig = plt.figure(figsize=(16, 12))
+    fig.suptitle("Sensor Simulation (X-Downrange, Y-Right, Z-Down)", fontsize=16)
 
     # =========================================================================
     # ACCELEROMETER SUBPLOTS
@@ -148,25 +182,10 @@ def sim():
         if incl_idx == 1:
             ax.legend()
 
-    # =========================================================================
-    # GPS POSITION SUBPLOTS (X, Y, Z)
-    # =========================================================================
-    for pos_idx in range(3):
-        ax = plt.subplot(4, 4, pos_idx + 11)
-        pos_name = ['X', 'Y', 'Z'][pos_idx]
-        
-        ax.plot(time_array, gps_pos_true[:, pos_idx], 'b-', linewidth=2, label='True', alpha=0.7)
-        ax.plot(time_array, gps_pos_measured[:, pos_idx], 'r.', markersize=3, label='Measured', alpha=0.7)
-        
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel(f'Position {pos_name} (m)')
-        ax.set_title(f'GPS Position {pos_name}')
-        ax.grid(True, alpha=0.3)
-        if pos_idx == 2:
-            ax.legend()
+
 
     # Add a summary text box
-    ax_summary = plt.subplot(4, 4, 16)
+    ax_summary = plt.subplot(4, 4, 11)
     ax_summary.axis('off')
     summary_text = (
         f'Simulation Parameters:\n'
@@ -178,57 +197,72 @@ def sim():
         f'Sensors:\n'
         f'- Accelerometer 3-axis\n'
         f'- Gyroscope Quaternion\n'
-        f'- Inclinometer 2-axis\n'
-        f'- GPS Receiver'
+        f'- Inclinometer 2-axis'
     )
     ax_summary.text(0.1, 0.5, summary_text, fontsize=10, verticalalignment='center',
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     plt.tight_layout()
-    plt.savefig('sensor_simulation_results.png', dpi=150, bbox_inches='tight')
-    print("\nPlot saved as 'sensor_simulation_results.png'")
+    fig_filename = 'sensor_sim_results.png'
+    plt.savefig(SAVE_DIR / fig_filename, dpi=150, bbox_inches='tight')
+    print(f"\nPlot saved as '{fig_filename}' in the '{SAVE_DIR}' directory.")
     plt.close()
+    
+    # Save sensor data to CSV
+    save_sensor_data_to_csv(time_array, accel_true, accel_measured, quat_true, quat_measured,
+                            inclin_true, inclin_measured, euler_true, fig_filename)
 
     print("\n" + "=" * 70)
     print("Simulation visualization complete!")
     print("=" * 70)
 
-if __name__ == "__main__":
-    # Initialize sensors
-    accel = Accelerometer3Axis(
-        sensor_id="accel_main",
-        white_noise_std=np.array([0.02, 0.02, 0.02]),
-        initial_bias=np.array([0.03, -0.02, 0.01]),
-        seed=42
-    )
 
-    gyro_quat = GyroscopeQuaternion(
-        sensor_id="gyro_quat",
-        initial_quaternion=[1.0, 0.0, 0.0, 0.0],
-        white_noise_std=np.array([0.001, 0.001, 0.001]),
-        quaternion_noise_std=0.01,
-        seed=42
-    )
-
-    inclin = Inclinometer2Axis(
-        sensor_id="inclinometer",
-        white_noise_std=np.array([0.02, 0.02]),
-        seed=42
-    )
-
-    gnss = GNSSReceiver(
-        sensor_id="gps",
-        position_noise_std=2.0,
-        velocity_noise_std=0.1,
-        update_rate_hz=10.0,
-        seed=42
-    )
-
-    # Simulation parameters
-    dt = 1/400  # 400 Hz
-    total_duration = 20.0  # 20 seconds of static motion
-    n_steps = int(total_duration / dt)
-
-    print(f"\nSimulating {total_duration} seconds at {1/dt:.0f} Hz ({n_steps} steps)...")
+def save_sensor_data_to_csv(time_array, accel_true, accel_measured, quat_true, quat_measured,
+                             inclin_true, inclin_measured, euler_true, fig_filename):
+    """
+    Save all sensor data to a timestamped CSV file.
+    Missing GPS data points are left blank in the CSV.
+    """
+    # Generate timestamp from figure filename
+    csv_filename = f"sensor_sim_results.csv"
+    csv_path = DATA_DIR / csv_filename
     
-    sim()
+    # Create a DataFrame with all data
+    n_steps = len(time_array)
+    
+    data_dict = {
+        'time(s)': time_array,
+        # Accelerometer
+        'accel_true_x(m/s^2)': accel_true[:, 0],
+        'accel_true_y(m/s^2)': accel_true[:, 1],
+        'accel_true_z(m/s^2)': accel_true[:, 2],
+        'accel_meas_x(m/s^2)': accel_measured[:, 0],
+        'accel_meas_y(m/s^2)': accel_measured[:, 1],
+        'accel_meas_z(m/s^2)': accel_measured[:, 2],
+        # Quaternion
+        'quat_true_w': quat_true[:, 0],
+        'quat_true_x': quat_true[:, 1],
+        'quat_true_y': quat_true[:, 2],
+        'quat_true_z': quat_true[:, 3],
+        'quat_meas_w': quat_measured[:, 0],
+        'quat_meas_x': quat_measured[:, 1],
+        'quat_meas_y': quat_measured[:, 2],
+        'quat_meas_z': quat_measured[:, 3],
+        # Inclinometer
+        'inclin_true_pitch(rad)': inclin_true[:, 0],
+        'inclin_true_roll(rad)': inclin_true[:, 1],
+        'inclin_meas_pitch(rad)': inclin_measured[:, 0],
+        'inclin_meas_roll(rad)': inclin_measured[:, 1],
+        # Euler angles
+        'euler_true_roll(rad)': euler_true[:, 0],
+        'euler_true_pitch(rad)': euler_true[:, 1],
+        'euler_true_yaw(rad)': euler_true[:, 2],
+    }
+    
+    df = pd.DataFrame(data_dict)
+    df.to_csv(csv_path, index=False)
+    print(f"Sensor data saved to '{csv_filename}' in the '{DATA_DIR}' directory.")
+
+
+if __name__ == "__main__":
+    sensor_data_sim()

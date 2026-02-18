@@ -1,7 +1,7 @@
-from sensor_framework import SimulatedSensor, SensorSpec
+from .sensor_framework import SimulatedSensor, SensorSpec
 import numpy as np
 from typing import Optional
-import util
+from ..util.angles import dcm_from_euler, euler_from_dcm, quat_from_dcm
 
 # ==============================================================================
 # VISION-BASED SENSORS
@@ -154,7 +154,7 @@ if __name__ == "__main__":
                     seed=42
                 )
                 position = np.array([0.0, 0.0, 0.0])
-                dcm = util.dcm_from_euler(0.0, 0.0, 0.0)
+                dcm = dcm_from_euler(0.0, 0.0, 0.0)
                 
                 measurement = sensor.step_from_truth(position, dcm, 0.05, 0.05)
                 self.assertIsNotNone(measurement)
@@ -174,7 +174,7 @@ if __name__ == "__main__":
                     seed=42
                 )
                 position = np.array([1.0, 2.0, 3.0])
-                dcm = util.dcm_from_euler(0.0, 0.0, 0.0)
+                dcm = dcm_from_euler(0.0, 0.0, 0.0)
                 
                 measurement = sensor.step_from_truth(position, dcm, 0.05, 0.05)
                 self.assertIsNotNone(measurement)
@@ -194,7 +194,7 @@ if __name__ == "__main__":
                 )
                 position = np.array([0.0, 0.0, 0.0])
                 pitch_true = np.radians(30.0)
-                dcm = util.dcm_from_euler(0.0, pitch_true, 0.0)
+                dcm = dcm_from_euler(0.0, pitch_true, 0.0)
                 
                 measurement = sensor.step_from_truth(position, dcm, 0.05, 0.05)
                 self.assertIsNotNone(measurement)
@@ -210,7 +210,7 @@ if __name__ == "__main__":
             try:
                 sensor = VisionPoseEstimator(update_rate_hz=30.0, seed=42)
                 position = np.array([1.0, 2.0, 3.0])
-                dcm = util.dcm_from_euler(0.0, 0.0, 0.0)
+                dcm = dcm_from_euler(0.0, 0.0, 0.0)
                 
                 # Try multiple updates within one period
                 dt = 0.01  # 10 ms
@@ -241,7 +241,7 @@ if __name__ == "__main__":
                     seed=42
                 )
                 position = np.array([0.0, 0.0, 0.0])
-                dcm = util.dcm_from_euler(0.0, 0.0, 0.0)
+                dcm = dcm_from_euler(0.0, 0.0, 0.0)
                 
                 measurement = sensor.step_from_truth(position, dcm, 0.05, 0.05)
                 self.assertIsNotNone(measurement)
@@ -260,7 +260,7 @@ if __name__ == "__main__":
                     seed=42
                 )
                 position = np.array([1.0, 2.0, 3.0])
-                dcm = util.dcm_from_euler(0.0, np.radians(15.0), 0.0)
+                dcm = dcm_from_euler(0.0, np.radians(15.0), 0.0)
                 
                 # Record multiple measurements
                 count = 0
@@ -301,7 +301,7 @@ if __name__ == "__main__":
                     
                     # Orientation: pitch oscillating at 1 Hz
                     pitch = 0.3 * np.sin(2 * np.pi * 1.0 * t)
-                    dcm = util.dcm_from_euler(0.0, pitch, 0.0)
+                    dcm = dcm_from_euler(0.0, pitch, 0.0)
                     
                     measurement = sensor.step_from_truth(position, dcm, dt, t)
                     if measurement is not None:
@@ -418,8 +418,8 @@ if __name__ == "__main__":
                 pitch_test = np.radians(25.0)
                 yaw_test = np.radians(15.0)
                 
-                dcm = util.dcm_from_euler(roll_test, pitch_test, yaw_test)
-                quat_expected = util.quat_from_dcm(dcm)
+                dcm = dcm_from_euler(roll_test, pitch_test, yaw_test)
+                quat_expected = quat_from_dcm(dcm)
                 
                 # Provide the expected quaternion
                 measurement = sensor.step_from_truth(position, quat_expected, 0.05, 0.05)
@@ -479,8 +479,8 @@ if __name__ == "__main__":
                     
                     # Rotating orientation
                     yaw = 2 * np.pi * 0.5 * t
-                    dcm = util.dcm_from_euler(0.0, 0.0, yaw)
-                    quaternion = util.quat_from_dcm(dcm)
+                    dcm = dcm_from_euler(0.0, 0.0, yaw)
+                    quaternion = quat_from_dcm(dcm)
                     
                     measurement = sensor.step_from_truth(position, quaternion, dt, t)
                     if measurement is not None:

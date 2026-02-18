@@ -2,6 +2,22 @@ import numpy as np
 from abc import ABC, abstractmethod
 from typing import Callable, Tuple, Optional, List
 
+# allow ``python src/filters/sensor_fusion.py`` to work by placing the
+# package root on sys.path; this mirrors the behaviour of ``python -m``.
+if __name__ == "__main__" and __package__ is None:
+    import os, sys
+    pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if pkg_root not in sys.path:
+        sys.path.insert(0, pkg_root)
+    __package__ = "src.filters"
+
+# bring in concrete sensor implementations from the canonical sensors package
+# use relative imports so module can be executed as part of the `src` package
+from ..sensors.IMU import Accelerometer3Axis, Gyroscope3Axis
+from ..sensors.GNSS import GNSSReceiver
+from ..sensors.inclinometers import Inclinometer1Axis, Inclinometer2Axis
+from ..util import quaternion_multiply, quaternion_normalize, quaternion_to_rotation_matrix, euler_from_dcm
+
 """
 -------------------------------------------------------------------------------
 OBJECT ORIENTED EXTENDED KALMAN FILTER (EKF) FRAMEWORK
@@ -11,6 +27,8 @@ Architecture:
 1. State:           Holds the 'Truth' (x) and Uncertainty (P).
 2. SystemModel:     Defines how the system moves (Physics/Kinetics).
 3. Sensor (Base):   Defines how a sensor sees the world (Measurement Models).
+   * concrete implementations now reside in ``src/sensors``; this module only
+     contains lightweight adapters that expose a uniform API to the EKF engine.
 4. EKF (Engine):    Performs the recursive estimation.
 
 Conventions:
@@ -20,42 +38,7 @@ Conventions:
 -------------------------------------------------------------------------------
 """
 
-# =============================================================================
-# QUATERNION UTILITIES
-# =============================================================================
 
-def quaternion_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    """Quaternion multiplication q1 * q2 (q = [q0, q1, q2, q3] scalar-first)."""
-    q0_1, q1_1, q2_1, q3_1 = q1[0], q1[1], q1[2], q1[3]
-    q0_2, q1_2, q2_2, q3_2 = q2[0], q2[1], q2[2], q2[3]
-    return np.array([
-        q0_1*q0_2 - q1_1*q1_2 - q2_1*q2_2 - q3_1*q3_2,
-        q0_1*q1_2 + q1_1*q0_2 + q2_1*q3_2 - q3_1*q2_2,
-        q0_1*q2_2 - q1_1*q3_2 + q2_1*q0_2 + q3_1*q1_2,
-        q0_1*q3_2 + q1_1*q2_2 - q2_1*q1_2 + q3_1*q0_2
-    ])
-
-def quaternion_conjugate(q: np.ndarray) -> np.ndarray:
-    """Quaternion conjugate: [q0, -q1, -q2, -q3]."""
-    return np.array([q[0], -q[1], -q[2], -q[3]])
-
-def quaternion_norm(q: np.ndarray) -> float:
-    """Euclidean norm of quaternion."""
-    return np.linalg.norm(q)
-
-def quaternion_normalize(q: np.ndarray) -> np.ndarray:
-    """Normalize quaternion to unit norm."""
-    return q / quaternion_norm(q)
-
-def quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
-    """Convert quaternion (q0, q1, q2, q3) to 3x3 rotation matrix (body->NED)."""
-    q = quaternion_normalize(q)
-    q0, q1, q2, q3 = q[0], q[1], q[2], q[3]
-    return np.array([
-        [1 - 2*(q2**2 + q3**2),     2*(q1*q2 - q0*q3),     2*(q1*q3 + q0*q2)],
-        [    2*(q1*q2 + q0*q3), 1 - 2*(q1**2 + q3**2),     2*(q2*q3 - q0*q1)],
-        [    2*(q1*q3 - q0*q2),     2*(q2*q3 + q0*q1), 1 - 2*(q1**2 + q2**2)]
-    ])
 
 # =============================================================================
 # STATE CLASS (16-DOF Quaternion-based)
@@ -93,46 +76,83 @@ class State:
     def get_quaternion_rate(self) -> np.ndarray:
         return self.x[10:14]
     
+    def get_euler_angles(self) -> np.ndarray:
+        q = self.get_quaternion().flatten()
+        return quaternion_to_euler(q)
+    
     def get_accel_bias(self) -> np.ndarray:
         return self.x[13:16]
     
     def set_quaternion(self, q: np.ndarray):
         self.x[6:10] = quaternion_normalize(q).reshape((4, 1))
 
-class Sensor(ABC):
+# The sensor abstraction used by the EKF is now a thin wrapper around the
+# classes defined in the `src/sensors` package.  Those classes handle all of
+# the simulation/hardware error modeling, buffering, frame transforms, etc.
+#
+# SensorFusion remains responsible only for providing a common interface to
+# the Kalman filter (measurement_model, jacobian and noise covariance).
+
+class EKFSensorAdapter:
+    """Adapter that exposes a light-weight EKF-friendly API for any
+    ``src.sensors`` object.
+
+    The adapter holds a reference to the underlying sensor instance so that
+    the simulation world can still step it forward independently, but the EKF
+    only sees the parts it needs:
+
+        * ``m_dim`` – measurement dimension
+        * ``R``     – noise covariance used during the update
+        * ``measurement_model(state)`` – computes expected z from a State
+        * ``jacobian(state)``          – linearisation of ``h`` around ``state``
+
+    Additional helper constructors (``adapt_gnss`` / ``adapt_accel`` etc.)
+    are provided below to build common mappings to the 16‑DOF quaternion state.
     """
-    Abstract Base Class for all Sensors (Accelerometer, Gyro, GPS, etc.).
-    
-    To add a new sensor (e.g., a Visual Odometry unit), subclass this,
-    define the noise characteristics (R), and the measurement model (h).
+
+    def __init__(
+        self,
+        base_sensor,
+        measurement_model: Callable[["State"], np.ndarray],
+        jacobian: Callable[["State"], np.ndarray],
+        R: Optional[np.ndarray] = None,
+    ):
+        self.base_sensor = base_sensor
+        self.name = getattr(base_sensor, "sensor_id", str(base_sensor))
+        self.m_dim = base_sensor.spec.dimension
+        self.R = R if R is not None else np.eye(self.m_dim)
+        self.measurement_model = measurement_model
+        self.jacobian = jacobian
+
+    def set_noise_covariance(self, R: np.ndarray):
+        """Override the measurement noise covariance used by the EKF."""
+        self.R = R
+
+
+# helper for numeric jacobians reused by several adapters
+
+def _numeric_jacobian(
+    h_func: Callable[[State], np.ndarray],
+    state: "State",
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """Compute a simple finite–difference Jacobian of ``h_func`` at ``state``.
+
+    ``h_func`` is expected to return an ``(m,1)`` column vector.  The returned
+    matrix has shape ``(m,n)`` where ``n`` is ``state.dim``.
     """
-    def __init__(self, name: str, measurement_dim: int):
-        self.name = name
-        self.m_dim = measurement_dim
-        # R: Measurement Noise Covariance Matrix
-        self.R = np.eye(measurement_dim)
-
-    def set_noise_covariance(self, noise_std_devs: List[float]):
-        """Helper to set R based on standard deviations."""
-        if len(noise_std_devs) != self.m_dim:
-            raise ValueError(f"Expected {self.m_dim} noise values.")
-        np.fill_diagonal(self.R, [x**2 for x in noise_std_devs])
-
-    @abstractmethod
-    def measurement_model(self, state: State) -> np.ndarray:
-        """
-        h(x): Nonlinear mapping from State Space to Measurement Space.
-        Returns expected measurement z_hat (m x 1).
-        """
-        pass
-
-    @abstractmethod
-    def jacobian(self, state: State) -> np.ndarray:
-        """
-        H: Jacobian of the measurement model h(x) with respect to x.
-        Returns H matrix (m x n).
-        """
-        pass
+    m = h_func(state).shape[0]
+    n = state.dim
+    H = np.zeros((m, n))
+    base = h_func(state)
+    for j in range(n):
+        dx = np.zeros((n, 1))
+        dx[j, 0] = eps
+        tmp = State(dim=n)
+        tmp.x = state.x.copy() + dx
+        tmp.P = state.P.copy()
+        H[:, j] = ((h_func(tmp) - base).reshape(m) / eps)
+    return H
 
 class ExtendedKalmanFilter:
     """
@@ -168,13 +188,14 @@ class ExtendedKalmanFilter:
         
         self.state.timestamp += dt
 
-    def update(self, sensor: Sensor, z_measurement: np.ndarray):
+    def update(self, sensor, z_measurement: np.ndarray):
         """
         Measurement Update Step (A Posteriori).
         Fuses a sensor reading into the state.
         
         Args:
-            sensor: The Sensor object providing the model.
+            sensor: An object with ``measurement_model``, ``jacobian`` and
+                    ``R`` attributes (typically an ``EKFSensorAdapter``).
             z_measurement: The raw data from hardware (m x 1).
         """
         # 1. Calculate Innovation (Residual)
@@ -206,6 +227,9 @@ class ExtendedKalmanFilter:
         # P = (I - K * H) * P
         I = np.eye(self.state.dim)
         self.state.P = (I - K @ H) @ self.state.P
+
+    def __repr__(self):
+        return f"EKF(State={self.state.x.flatten()}, P={self.state.P})"
 
 # -----------------------------------------------------------------------------
 # CONCRETE IMPLEMENTATION EXAMPLES (The "Plug and Play" Part)
@@ -284,202 +308,191 @@ class NavigationPhysics:
         
         return F
 
-class GPSSensor(Sensor):
+# the concrete sensor definitions have been moved into `src.sensors`.
+# instead of re-defining them here we provide a few helper constructors that
+# create ``EKFSensorAdapter`` instances for the most common devices.
+
+
+def adapt_gnss_sensor(gnss: GNSSReceiver) -> EKFSensorAdapter:
+    """Return an EKF adapter that maps a GNSSReceiver to the 16‑DOF state.
+
+    The underlying GNSSReceiver produces a 6‑vector [x,y,z,vx,vy,vz].  The
+    measurement model simply pulls the same quantities out of the Kalman state
+    (
+        position = state[0:3], velocity = state[3:6]
+    ).
     """
-    Example of a concrete sensor implementation.
+    def h(state: State) -> np.ndarray:
+        return np.vstack((state.get_position(), state.get_velocity()))
+
+    def H(state: State) -> np.ndarray:
+        Hmat = np.zeros((6, state.dim))
+        Hmat[0:3, 0:3] = np.eye(3)
+        Hmat[3:6, 3:6] = np.eye(3)
+        return Hmat
+
+    adapter = EKFSensorAdapter(gnss, h, H)
+    if hasattr(gnss, "white_noise_std"):
+        adapter.R = np.diag(gnss.white_noise_std ** 2)
+    return adapter
+
+
+def adapt_accel_sensor(
+    accel: Accelerometer3Axis,
+    bias_index: int = 13,
+) -> EKFSensorAdapter:
+    """Wrap a 3‑axis accelerometer for use with the EKF state.
+
+    ``bias_index`` indicates where in ``State.x`` the 3‑vector of accel bias
+    lives (default matches the 16‑DOF layout defined above).
     """
-    def __init__(self):
-        super().__init__("GPS", measurement_dim=3)
-        # GPS usually has ~2.5m accuracy
-        self.set_noise_covariance([2.5, 2.5, 5.0]) # x, y, z errors
+    mounting = (
+        accel.dcm_body_to_sensor
+        if hasattr(accel, "dcm_body_to_sensor")
+        else np.eye(3)
+    )
 
-    def measurement_model(self, state: State) -> np.ndarray:
-        """
-        GPS measures Position directly.
-        h(x) = [px, py, pz].T
-        """
-        # Extract position from state (indices 0, 1, 2)
-        return state.x[0:3]
+    def h(state: State) -> np.ndarray:
+        q = state.get_quaternion().flatten()
+        Rb2n = quaternion_to_rotation_matrix(q)
+        g_ned = np.array([0.0, 0.0, 9.81])
+        g_body = Rb2n.T @ g_ned
+        meas = -g_body.reshape((3, 1))
+        bias = state.x[bias_index : bias_index + 3].reshape((3, 1))
+        return mounting @ meas + bias
 
-    def jacobian(self, state: State) -> np.ndarray:
-        """
-        H Matrix. 
-        Since measurement is linear (1-to-1 with position states),
-        this is simple.
-        """
-        H = np.zeros((self.m_dim, state.dim))
-        H[0, 0] = 1 # Measure px
-        H[1, 1] = 1 # Measure py
-        H[2, 2] = 1 # Measure pz
-        return H
+    def H(state: State) -> np.ndarray:
+        return _numeric_jacobian(h, state)
+
+    adapter = EKFSensorAdapter(accel, h, H)
+    if hasattr(accel, "white_noise_std"):
+        adapter.R = np.diag(accel.white_noise_std ** 2)
+    return adapter
 
 
-class AccelerometerSensor(Sensor):
+def adapt_gyro_sensor(
+    gyro: Gyroscope3Axis,
+    bias_index: Optional[int] = None,
+) -> EKFSensorAdapter:
+    """Wrap a 3‑axis gyro for EKF.
+
+    ``bias_index`` may be ``None`` if there is no gyro‑bias state.
     """
-    Accelerometer sensor model.
+    mounting = (
+        gyro.dcm_body_to_sensor
+        if hasattr(gyro, "dcm_body_to_sensor")
+        else np.eye(3)
+    )
 
-    The sensor expects a `measurement_func` callable that returns the
-    expected specific force (3x1) in the body frame *without* bias.
-    The sensor will add the accelerometer bias (read from `state`) and
-    an optional mounting rotation to produce the final expected measurement.
-    """
-    def __init__(self,
-                 name: str = "ACC",
-                 measurement_func: Optional[Callable[[State], np.ndarray]] = None,
-                 bias_start_index: int = 9,
-                 mounting_R: Optional[np.ndarray] = None):
-        super().__init__(name, measurement_dim=3)
-        self.measurement_func = measurement_func
-        self.bias_start = bias_start_index
-        self.mounting_R = np.eye(3) if mounting_R is None else mounting_R
-
-    def _get_bias(self, state: State) -> np.ndarray:
-        return state.x[self.bias_start:self.bias_start+3].reshape((3, 1))
-
-    def measurement_model(self, state: State) -> np.ndarray:
-        if self.measurement_func is None:
-            raise RuntimeError("Accelerometer measurement_func not provided")
-        true_specific_force = self.measurement_func(state).reshape((3, 1))
-        # apply mounting rotation and bias
-        meas = self.mounting_R @ true_specific_force + self._get_bias(state)
+    def h(state: State) -> np.ndarray:
+        omega = state.x[10:13].reshape((3, 1))
+        meas = mounting @ omega
+        if bias_index is not None:
+            bias = state.x[bias_index : bias_index + 3].reshape((3, 1))
+            meas = meas + bias
         return meas
 
-    def jacobian(self, state: State) -> np.ndarray:
-        # Numerical Jacobian w.r.t full state
-        eps = 1e-6
-        m = self.m_dim
-        n = state.dim
-        H = np.zeros((m, n))
-        base = self.measurement_model(state)
-        for i in range(n):
-            dx = np.zeros((n, 1))
-            dx[i, 0] = eps
-            tmp_state = State(dim=n)
-            tmp_state.x = state.x.copy() + dx
-            tmp_state.P = state.P.copy()
-            tmp = self.measurement_model(tmp_state)
-            H[:, i] = ((tmp - base).reshape(m) / eps)
-        return H
+    def H(state: State) -> np.ndarray:
+        return _numeric_jacobian(h, state)
+
+    adapter = EKFSensorAdapter(gyro, h, H)
+    if hasattr(gyro, "white_noise_std"):
+        adapter.R = np.diag(gyro.white_noise_std ** 2)
+    return adapter
 
 
-class GyroscopeSensor(Sensor):
+def adapt_inclinometer_sensor(
+    inclinometer: Inclinometer1Axis,
+) -> EKFSensorAdapter:
+    """Wrap a 1-axis or 2-axis inclinometer for EKF.
+
+    Inclinometers measure tilt angles (pitch, roll) directly from the DCM derived
+    from the quaternion state. This provides absolute orientation constraints.
     """
-    Gyroscope sensor model.
+    def h(state: State) -> np.ndarray:
+        q = state.get_quaternion().flatten()
+        dcm = quaternion_to_rotation_matrix(q)
+        # Extract pitch and roll from DCM
+        pitch = np.arctan2(-dcm[2, 0], dcm[2, 2])
+        roll = np.arctan2(dcm[2, 1], dcm[2, 2])
+        if inclinometer.measurement_axis == "pitch":
+            return np.array([[pitch]])
+        elif inclinometer.measurement_axis == "roll":
+            return np.array([[roll]])
+        else:
+            return np.array([[pitch, roll]]).T
 
-    The sensor expects a `measurement_func` callable that returns the
-    expected angular rate (3x1) in the body frame *without* bias.
-    The sensor will add the gyro bias (read from `state`) and an optional
-    mounting rotation to produce the final expected measurement.
+    def H(state: State) -> np.ndarray:
+        return _numeric_jacobian(h, state)
+
+    adapter = EKFSensorAdapter(inclinometer, h, H)
+    if hasattr(inclinometer, "white_noise_std"):
+        adapter.R = np.diag(inclinometer.white_noise_std ** 2)
+    return adapter
+
+# composite adapter just stitches a list of adapters together
+
+def quaternion_to_euler(q: np.ndarray) -> Tuple[float, float, float]:
+    """Convert quaternion to Euler angles (roll, pitch, yaw).
+    
+    Uses DCM as intermediate representation.
+    Returns angles in radians.
     """
-    def __init__(self,
-                 name: str = "GYRO",
-                 measurement_func: Optional[Callable[[State], np.ndarray]] = None,
-                 bias_start_index: int = 12,
-                 mounting_R: Optional[np.ndarray] = None):
-        super().__init__(name, measurement_dim=3)
-        self.measurement_func = measurement_func
-        self.bias_start = bias_start_index
-        self.mounting_R = np.eye(3) if mounting_R is None else mounting_R
+    dcm = quaternion_to_rotation_matrix(q)
+    return euler_from_dcm(dcm)
 
-    def _get_bias(self, state: State) -> np.ndarray:
-        return state.x[self.bias_start:self.bias_start+3].reshape((3, 1))
+def composite_adapter(adapters: List[EKFSensorAdapter]) -> EKFSensorAdapter:
+    total_dim = sum(a.m_dim for a in adapters)
+    name = "+".join(a.name for a in adapters)
 
-    def measurement_model(self, state: State) -> np.ndarray:
-        if self.measurement_func is None:
-            raise RuntimeError("Gyro measurement_func not provided")
-        true_omega = self.measurement_func(state).reshape((3, 1))
-        meas = self.mounting_R @ true_omega + self._get_bias(state)
-        return meas
-
-    def jacobian(self, state: State) -> np.ndarray:
-        # Numerical Jacobian w.r.t full state
-        eps = 1e-6
-        m = self.m_dim
-        n = state.dim
-        H = np.zeros((m, n))
-        base = self.measurement_model(state)
-        for i in range(n):
-            dx = np.zeros((n, 1))
-            dx[i, 0] = eps
-            tmp_state = State(dim=n)
-            tmp_state.x = state.x.copy() + dx
-            tmp_state.P = state.P.copy()
-            tmp = self.measurement_model(tmp_state)
-            H[:, i] = ((tmp - base).reshape(m) / eps)
-        return H
-
-
-class CompositeSensor(Sensor):
-    """
-    Composite sensor that stacks multiple `Sensor` objects into a single
-    measurement model and Jacobian. Useful when you have many accelerometers
-    and gyroscopes to fuse at once.
-    """
-    def __init__(self, sensors: List[Sensor], name: str = "COMPOSITE"):
-        total_dim = sum(s.m_dim for s in sensors)
-        super().__init__(name, measurement_dim=total_dim)
-        self.sensors = sensors
-        # Build block-diagonal R
-        R_blocks = [s.R for s in sensors]
-        self.R = np.zeros((total_dim, total_dim))
-        idx = 0
-        for Rb in R_blocks:
-            m = Rb.shape[0]
-            self.R[idx:idx+m, idx:idx+m] = Rb
-            idx += m
-
-    def measurement_model(self, state: State) -> np.ndarray:
-        parts = [s.measurement_model(state).reshape((s.m_dim, 1)) for s in self.sensors]
+    def h(state: State) -> np.ndarray:
+        parts = [a.measurement_model(state) for a in adapters]
         return np.vstack(parts)
 
-    def jacobian(self, state: State) -> np.ndarray:
-        H_parts = [s.jacobian(state) for s in self.sensors]
-        return np.vstack(H_parts)
+    def H(state: State) -> np.ndarray:
+        parts = [a.jacobian(state) for a in adapters]
+        return np.vstack(parts)
 
-# -----------------------------------------------------------------------------
-# USAGE DEMO: multiple accelerometers + gyros fused via CompositeSensor
-# -----------------------------------------------------------------------------
+    comp = EKFSensorAdapter(adapters[0].base_sensor, h, H)
+    # assemble block diag R
+    R = np.zeros((total_dim, total_dim))
+    idx = 0
+    for a in adapters:
+        R[idx : idx + a.m_dim, idx : idx + a.m_dim] = a.R
+        idx += a.m_dim
+    comp.R = R
+    comp.name = name
+    return comp
+
+
 if __name__ == "__main__":
-    # 1. Initialize a full 15-state navigation vector (pos, vel, att_err, acc_bias, gyro_bias)
-    nav_state = State(dim=15)
+    # demo showing EKF fusion with accelerometer, gyroscope, and inclinometer sensors
+    nav_state = State(dim=16)  # 16‑DOF quaternion state
     ekf = ExtendedKalmanFilter(nav_state)
-    gps = GPSSensor()
 
-    # Simple measurement functions for demo
-    def accel_measurement_func(state: State) -> np.ndarray:
-        # Very simple: specific force equals -gravity in body frame
-        return np.array([0.0, 0.0, -9.81])
+    # IMU sensors (accelerometer + gyroscope)
+    accel = Accelerometer3Axis(sensor_id="accel_1")
+    gyro = Gyroscope3Axis(sensor_id="gyro_1")
 
-    def gyro_measurement_func(state: State) -> np.ndarray:
-        # No rotation for this demo
-        return np.zeros(3)
+    # Inclinometer sensors for absolute orientation correction
+    inclin_pitch = Inclinometer1Axis(sensor_id="inclin_pitch", measurement_axis="pitch")
+    inclin_roll = Inclinometer1Axis(sensor_id="inclin_roll", measurement_axis="roll")
 
-    # Create multiple accelerometers and gyros
-    acc1 = AccelerometerSensor(name="ACC1", measurement_func=accel_measurement_func, bias_start_index=9)
-    acc1.set_noise_covariance([0.05, 0.05, 0.05])
+    # Create adapters
+    acc_adapter = adapt_accel_sensor(accel)
+    gyro_adapter = adapt_gyro_sensor(gyro)
+    pitch_adapter = adapt_inclinometer_sensor(inclin_pitch)
+    roll_adapter = adapt_inclinometer_sensor(inclin_roll)
 
-    acc2 = AccelerometerSensor(name="ACC2", measurement_func=accel_measurement_func, bias_start_index=9,
-                               mounting_R=np.eye(3))
-    acc2.set_noise_covariance([0.1, 0.1, 0.1])
+    # Set small initial accel bias
+    nav_state.x[13:16] = np.array([[0.02], [-0.01], [0.005]])
+    Q_matrix = np.eye(nav_state.dim) * 0.01  # Process noise covariance
 
-    gyro1 = GyroscopeSensor(name="GYRO1", measurement_func=gyro_measurement_func, bias_start_index=12)
-    gyro1.set_noise_covariance([0.001, 0.001, 0.001])
-
-    gyro2 = GyroscopeSensor(name="GYRO2", measurement_func=gyro_measurement_func, bias_start_index=12)
-    gyro2.set_noise_covariance([0.002, 0.002, 0.002])
-
-    # Composite sensor stacking all IMU channels
-    imu_composite = CompositeSensor([acc1, acc2, gyro1, gyro2])
-
-    # Set small initial biases in the state (for demo visibility)
-    nav_state.x[9:12] = np.array([[0.05], [-0.02], [0.01]])
-    nav_state.x[12:15] = np.array([[0.005], [-0.003], [0.002]])
-
-    # Process noise (Q) for full 15-state system
-    Q_matrix = np.eye(15) * 0.01
-
-    # Run a short simulation: predict with simple kinematics and update with IMU composite
-    print("--- Starting EKF Fusion (IMU composite + GPS demo) ---")
+    # Set up true vectors for simulation validation
+    print("--- Starting EKF Fusion demo (IMU + inclinometers) ---")
+    print("Rolling from 0 to 5 degrees over 1 second...")
+    print("\nTime      | True Roll | True Pitch | True Yaw | Est Roll | Est Pitch | Est Yaw")
+    print("-" * 80)
     for t in range(10):
         dt = 0.1
         ekf.predict(
@@ -489,18 +502,44 @@ if __name__ == "__main__":
             Q=Q_matrix,
         )
 
-        # Simulate composite IMU measurement (true + noise)
-        z_true = imu_composite.measurement_model(nav_state)
-        noise = np.random.multivariate_normal(np.zeros(imu_composite.m_dim), imu_composite.R).reshape((imu_composite.m_dim, 1))
-        z_noisy = z_true + noise
+        # Step the sensors (they update internally with their error models)
+        z_acc = accel.step(np.array([0.0, 0.0, -9.81]), dt, t)
+        z_gyro = gyro.step(np.zeros(3), dt, t)
+        
+        # Create a test DCM with gradually increasing roll (0 to 5 degrees)
+        # Roll angle increases linearly over the 10 timesteps
+        roll_angle = (t / 9.0) * np.radians(5.0)  # 0 to 5 degrees
+        
+        # Create rotation matrix for pure roll about X-axis
+        # In coordinate frame: +X downrange, +Y right, +Z down
+        # Roll is rotation about X-axis
+        cr = np.cos(roll_angle)
+        sr = np.sin(roll_angle)
+        dcm_body_to_nav = np.array([
+            [1.0,   0.0,   0.0],
+            [0.0,    cr,    sr],
+            [0.0,   -sr,    cr]
+        ])
+        
+        # Compute true Euler angles from the true DCM
+        true_roll, true_pitch, true_yaw = euler_from_dcm(dcm_body_to_nav)
+        
+        z_pitch = inclin_pitch.step_from_dcm(dcm_body_to_nav, dt, t)
+        z_roll = inclin_roll.step_from_dcm(dcm_body_to_nav, dt, t)
 
-        ekf.update(imu_composite, z_noisy)
+        # Fuse into state
+        if z_acc is not None:
+            ekf.update(acc_adapter, np.atleast_2d(z_acc).reshape(-1, 1))
+        if z_gyro is not None:
+            ekf.update(gyro_adapter, np.atleast_2d(z_gyro).reshape(-1, 1))
+        if z_pitch is not None:
+            ekf.update(pitch_adapter, np.atleast_2d(z_pitch).reshape(-1, 1))
+        if z_roll is not None:
+            ekf.update(roll_adapter, np.atleast_2d(z_roll).reshape(-1, 1))
 
-        # Occasionally fuse GPS as well
-        if t % 5 == 0:
-            fake_gps = np.vstack((nav_state.x[0:3] + np.random.randn(3, 1) * 1.0))
-            ekf.update(gps, fake_gps)
-
-        print(f"t={t*dt:.2f}s pos_x={nav_state.x[0,0]:.3f} acc_bias_x={nav_state.x[9,0]:.4f} gyro_bias_x={nav_state.x[12,0]:.5f}")
-
+        # Extract and convert quaternion to Euler angles
+        roll_est, pitch_est, yaw_est = nav_state.get_euler_angles()
+        
+        # Format output with true and estimated values side by side
+        print(f"t={t*dt:.2f}s | {np.degrees(true_roll):8.4f}° | {np.degrees(true_pitch):9.4f}° | {np.degrees(true_yaw):7.4f}° | {np.degrees(roll_est):7.4f}° | {np.degrees(pitch_est):8.4f}° | {np.degrees(yaw_est):7.4f}°")
     print("--- Demo finished ---")

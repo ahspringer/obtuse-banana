@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from src.sensors.IMU import IMU, SensorMode
-from src.filters.sensor_fusion import State, ExtendedKalmanFilter, AccelerometerSensor, GyroscopeSensor
+from src.filters.sensor_fusion import State, ExtendedKalmanFilter, adapt_accel_sensor, adapt_gyro_sensor, adapt_gnss_sensor
 
 def playback_csv_to_imu(file_path: str):
     """

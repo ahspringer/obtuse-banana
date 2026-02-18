@@ -9,7 +9,7 @@ from collections import deque
 from typing import Optional, Tuple, Union, Dict, List, Any
 from enum import Enum
 from dataclasses import dataclass
-from sensor_framework import FrameAwareSensor, BaseSensor, SensorSpec
+from .sensor_framework import FrameAwareSensor, BaseSensor, SensorSpec
 
 class Accelerometer3Axis(FrameAwareSensor):
     """
@@ -225,7 +225,7 @@ class GyroscopeQuaternion(BaseSensor):
 
 if __name__ == "__main__":
     import unittest
-    import util
+    from ..util.angles import dcm_from_euler, euler_from_dcm, quaternion_to_rotation_matrix
 
     # ==================================================================
     # UNIT TESTS FOR ACCELEROMETER
@@ -433,7 +433,7 @@ if __name__ == "__main__":
                 mag_ned = np.array([30.0, 0.0, 40.0])
                 
                 # 45 degree pitch rotation
-                dcm = util.dcm_from_euler(0.0, np.radians(45.0), 0.0)
+                dcm = dcm_from_euler(0.0, np.radians(45.0), 0.0)
                 
                 measured = mag.step_with_frame(mag_ned, 0.01, 0.0)
                 

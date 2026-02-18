@@ -4,12 +4,15 @@ Filename: inclinomters.py
 Description: Inclinometer sensor models for single-axis and dual-axis tilt measurements.
              These sensors extract pitch and roll angles from the DCM and apply error models to simulate real-world measurements.
              
+COORDINATE SYSTEM: +X = downrange, +Y = right, +Z = down
+The inclinometer measures tilt angles (pitch and roll) relative to gravity (Z-down).
+             
              Each sensor operates in either SIMULATION or HARDWARE mode.
 """
 
 import numpy as np
-import util
-from sensor_framework import SimulatedSensor, SensorSpec
+from ..util.angles import dcm_from_euler, euler_from_dcm
+from .sensor_framework import SimulatedSensor, SensorSpec
 
 class Inclinometer1Axis(SimulatedSensor):
     """
@@ -102,7 +105,7 @@ if __name__ == "__main__":
             print("\n[TEST] Level orientation - pitch axis: Testing that pitch reads ~0° at level orientation.")
             try:
                 inc = Inclinometer1Axis(measurement_axis="pitch")
-                dcm = util.dcm_from_euler(0.0, 0.0, 0.0)  # Level
+                dcm = dcm_from_euler(0.0, 0.0, 0.0)  # Level
                 
                 measured = inc.step_from_dcm(dcm, 0.01, 0.0)
                 self.assertAlmostEqual(measured[0], 0.0, places=5)
@@ -114,7 +117,7 @@ if __name__ == "__main__":
             print("\n[TEST] Level orientation - roll axis: Testing that roll reads ~0° at level orientation.")
             try:
                 inc = Inclinometer1Axis(measurement_axis="roll")
-                dcm = util.dcm_from_euler(0.0, 0.0, 0.0)  # Level
+                dcm = dcm_from_euler(0.0, 0.0, 0.0)  # Level
                 
                 measured = inc.step_from_dcm(dcm, 0.01, 0.0)
                 self.assertAlmostEqual(measured[0], 0.0, places=5)
@@ -127,7 +130,7 @@ if __name__ == "__main__":
             try:
                 inc = Inclinometer1Axis(measurement_axis="pitch")
                 pitch_true = np.radians(30.0)
-                dcm = util.dcm_from_euler(0.0, pitch_true, 0.0)
+                dcm = dcm_from_euler(0.0, pitch_true, 0.0)
                 
                 measured = inc.step_from_dcm(dcm, 0.01, 0.0)
                 self.assertAlmostEqual(measured[0], pitch_true, places=5)
@@ -140,7 +143,7 @@ if __name__ == "__main__":
             try:
                 inc = Inclinometer1Axis(measurement_axis="roll")
                 roll_true = np.radians(45.0)
-                dcm = util.dcm_from_euler(roll_true, 0.0, 0.0)
+                dcm = dcm_from_euler(roll_true, 0.0, 0.0)
                 
                 measured = inc.step_from_dcm(dcm, 0.01, 0.0)
                 self.assertAlmostEqual(measured[0], roll_true, places=5)
@@ -157,7 +160,7 @@ if __name__ == "__main__":
                     initial_bias=bias,
                     seed=12345
                 )
-                dcm = util.dcm_from_euler(0.0, 0.0, 0.0)  # Level
+                dcm = dcm_from_euler(0.0, 0.0, 0.0)  # Level
                 
                 measured = inc.step_from_dcm(dcm, 0.01, 0.0)
                 # Should read 5 degrees
@@ -175,7 +178,7 @@ if __name__ == "__main__":
                     white_noise_std=noise_std,
                     seed=42
                 )
-                dcm = util.dcm_from_euler(0.0, 0.0, 0.0)  # Level
+                dcm = dcm_from_euler(0.0, 0.0, 0.0)  # Level
                 
                 # Run multiple samples
                 measurements = []
@@ -202,7 +205,7 @@ if __name__ == "__main__":
                     seed=12345
                 )
                 pitch_true = np.radians(30.0)
-                dcm = util.dcm_from_euler(0.0, pitch_true, 0.0)
+                dcm = dcm_from_euler(0.0, pitch_true, 0.0)
                 
                 measured = inc.step_from_dcm(dcm, 0.01, 0.0)
                 # Should read 90% of true value
@@ -215,7 +218,7 @@ if __name__ == "__main__":
             print("\n[TEST] History tracking: Testing that sensor correctly maintains history buffer of measurements.")
             try:
                 inc = Inclinometer1Axis(measurement_axis="pitch", buffer_size=10)
-                dcm = util.dcm_from_euler(0.0, np.radians(15.0), 0.0)
+                dcm = dcm_from_euler(0.0, np.radians(15.0), 0.0)
                 
                 # Record 5 samples
                 for i in range(5):
@@ -236,7 +239,7 @@ if __name__ == "__main__":
             print("\n[TEST] 2-axis level orientation: Testing that both pitch and roll read ~0° at level orientation.")
             try:
                 inc = Inclinometer2Axis()
-                dcm = util.dcm_from_euler(0.0, 0.0, 0.0)  # Level
+                dcm = dcm_from_euler(0.0, 0.0, 0.0)  # Level
                 
                 measured = inc.step_from_dcm(dcm, 0.01, 0.0)
                 np.testing.assert_array_almost_equal(measured, [0.0, 0.0], decimal=5)
@@ -250,7 +253,7 @@ if __name__ == "__main__":
                 inc = Inclinometer2Axis()
                 roll_true = np.radians(20.0)
                 pitch_true = np.radians(25.0)  # Use smaller angles to avoid gimbal lock
-                dcm = util.dcm_from_euler(roll_true, pitch_true, 0.0)
+                dcm = dcm_from_euler(roll_true, pitch_true, 0.0)
                 
                 measured = inc.step_from_dcm(dcm, 0.01, 0.0)
                 # Use absolute tolerance for numerical precision issues with Euler extraction
@@ -268,7 +271,7 @@ if __name__ == "__main__":
             try:
                 bias = np.array([np.radians(2.0), np.radians(3.0)])  # Different bias per axis
                 inc = Inclinometer2Axis(initial_bias=bias, seed=12345)
-                dcm = util.dcm_from_euler(0.0, 0.0, 0.0)
+                dcm = dcm_from_euler(0.0, 0.0, 0.0)
                 
                 measured = inc.step_from_dcm(dcm, 0.01, 0.0)
                 np.testing.assert_array_almost_equal(measured, bias, decimal=5)
@@ -290,7 +293,7 @@ if __name__ == "__main__":
                 # Attempt a 90 degree pitch
                 roll_true = np.radians(0.0)
                 pitch_true = np.radians(90.0)
-                dcm = util.dcm_from_euler(roll_true, pitch_true, 0.0)
+                dcm = dcm_from_euler(roll_true, pitch_true, 0.0)
                 
                 measured = inc.step_from_dcm(dcm, 0.01, 0.0)
                 # Should be clipped to 45 degrees
@@ -316,7 +319,7 @@ if __name__ == "__main__":
                 
                 # Record samples at different times
                 for i in range(5):
-                    dcm = util.dcm_from_euler(0.0, np.radians(10.0 * i), 0.0)
+                    dcm = dcm_from_euler(0.0, np.radians(10.0 * i), 0.0)
                     inc.step_from_dcm(dcm, 0.01, float(i)*0.01)
                 
                 timestamps, hist_data = inc.get_history_with_timestamps()
@@ -350,7 +353,7 @@ if __name__ == "__main__":
                 
                 measurements = []
                 for i, t in enumerate(times):
-                    dcm = util.dcm_from_euler(0.0, pitch_true[i], 0.0)
+                    dcm = dcm_from_euler(0.0, pitch_true[i], 0.0)
                     measured = inc.step_from_dcm(dcm, dt, t)
                     measurements.append(measured[0])
                 
@@ -392,7 +395,7 @@ if __name__ == "__main__":
                 roll_measurements = []
                 
                 for i, t in enumerate(times):
-                    dcm = util.dcm_from_euler(roll_true[i], pitch_true[i], 0.0)
+                    dcm = dcm_from_euler(roll_true[i], pitch_true[i], 0.0)
                     measured = inc.step_from_dcm(dcm, dt, t)
                     pitch_measurements.append(measured[0])
                     roll_measurements.append(measured[1])
@@ -444,7 +447,7 @@ if __name__ == "__main__":
                 
                 measurements = []
                 for i, t in enumerate(times):
-                    dcm = util.dcm_from_euler(roll_true[i], pitch_true[i], 0.0)
+                    dcm = dcm_from_euler(roll_true[i], pitch_true[i], 0.0)
                     measured = inc.step_from_dcm(dcm, dt, t)
                     measurements.append(measured)
                 

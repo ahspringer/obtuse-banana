@@ -45,12 +45,14 @@ class BaseSensor:
         buffer_size (int): Max number of samples to keep in the ring buffer.
         history (deque): A sliding window of (timestamp, value) pairs.
         current_value (np.ndarray): The most recent measurement.
+        update_rate_hz (float, optional): If set, limits sensor update rate to this frequency.
     """
     def __init__(
         self, 
         sensor_id: str, 
         spec: SensorSpec,
-        buffer_size: int = 100
+        buffer_size: int = 100,
+        update_rate_hz: Optional[float] = None
     ):
         self.sensor_id = sensor_id
         self.spec = spec
@@ -62,6 +64,15 @@ class BaseSensor:
         # Initialize state with appropriate dimension
         self.current_value: np.ndarray = np.zeros(spec.dimension)
         self.current_timestamp: float = 0.0
+        
+        # Update rate limiting (Hz). If None, the sensor updates every step.
+        self.update_rate_hz = update_rate_hz
+        if update_rate_hz is not None:
+            self.update_period = 1.0 / update_rate_hz
+            self.last_update_time = 0.0
+        else:
+            self.update_period = 0.0
+            self.last_update_time = 0.0
 
     def _store(self, data: np.ndarray, timestamp: float):
         """
@@ -81,6 +92,27 @@ class BaseSensor:
     def get_latest(self) -> np.ndarray:
         """Access the most recent measurement vector."""
         return self.current_value
+    
+    def should_update(self, timestamp: float) -> bool:
+        """
+        Check if enough time has passed since the last update to generate a new measurement.
+        Used for limiting sensor update rates (e.g., 10 Hz GPS, 100 Hz IMU, 400 Hz accelerometer).
+        
+        Args:
+            timestamp: Current simulation or system time (seconds)
+            
+        Returns:
+            True if update should occur, False if not enough time has passed.
+            Always returns True if no update_rate_hz was specified.
+        """
+        if self.update_period == 0.0:
+            # No rate limiting
+            return True
+        
+        if timestamp - self.last_update_time >= self.update_period:
+            self.last_update_time = timestamp
+            return True
+        return False
 
     def get_history_matrix(self) -> np.ndarray:
         """
@@ -106,9 +138,13 @@ class BaseSensor:
 
 class SimulatedSensor(BaseSensor):
     """
-    Generic simulated sensor with configurable error models.
+    Generic simulated sensor with configurable error models and optional update rate limiting.
     
     Error chain: Truth -> Scale -> Bias -> Noise -> Saturation -> Quantization -> Output
+    
+    Update Rate:
+        All sensors can optionally have a limited update rate (e.g., 10 Hz for GPS, 100 Hz for IMU).
+        If update_rate_hz is not None, the sensor will return None until the update period has elapsed.
     """
     def __init__(
         self, 
@@ -121,10 +157,12 @@ class SimulatedSensor(BaseSensor):
         saturation_limits: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         quantization_bits: Optional[int] = None,
         quantization_range: Optional[float] = None,
+        update_rate_hz: Optional[float] = None,
         seed: Optional[int] = None,
         **kwargs
     ):
-        super().__init__(sensor_id, spec, **kwargs)
+        # Pass update_rate_hz to parent BaseSensor
+        super().__init__(sensor_id, spec, update_rate_hz=update_rate_hz, **kwargs)
         
         # Initialize error parameters with proper dimensions
         dim = spec.dimension

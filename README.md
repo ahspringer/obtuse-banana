@@ -10,9 +10,7 @@ This project prioritizes:
 - Determinism and performance
 - Data-driven tuning and validation against real-world DOPE
 
----
-
-## Design Philosophy
+## Simulator Design Philosophy
 
 ### Why Not Full 6-DOF (Initially)?
 A true 6-DOF rigid-body simulation requires:
@@ -61,187 +59,6 @@ This engine models **translation only (3-DOF)** while injecting **spin- and wind
 
 ---
 
-## Mathematical Model
-
-The following notation is used:
-
-| Notation           | Meaning               |
-| ------------------ | --------------------- |
-| $\mathbf{v}$       | Vector quantity       |
-| $\{\|\mathbf{v}\|}$     | Vector magnitude     |
-| $\hat{\mathbf{v}}$ | Unit vector |
-
-
-### State Vector (3-DOF)
-
-At time `t`:
-
-```math
-\mathbf{x}(t) =
-\begin{bmatrix}
-\mathbf{p}(t) \\
-\mathbf{v}(t)
-\end{bmatrix}
-```
-
-Where:
-- **p = (x, y, z)** — position (meters)
-- **v = (vx, vy, vz)** — velocity (m/s)
-
----
-
-### Relative Airflow
-
-The bullet only interacts with **airflow relative to its motion**:
-
-```math
-\mathbf{v}_{rel} = \mathbf{v}_{bullet} - \mathbf{v}_{wind}
-```
-
----
-
-### Airflow Decomposition
-
-Let velocity magnitude $\hat{\mathbf{v}}$:
-
-```math
-\hat{\mathbf{v}} = \frac{\mathbf{v}}{\|\mathbf{v}\|}
-```
-
-**Axial (head/tail wind):**
-
-```math
-\mathbf{v}_{ax} = (\mathbf{v}_{rel} \cdot \hat{\mathbf{v}})\,\hat{\mathbf{v}}
-```
-
-**Normal (cross-flow):**
-
-```math
-\mathbf{v}_{n} = \mathbf{v}_{rel} - \mathbf{v}_{ax}
-```
-
----
-
-## Forces
-
-### Gravity
-
-```math
-\mathbf{F}_g = m\,\mathbf{g}
-```
-
----
-
-### Drag (Axial Only)
-
-```math
-\mathbf{F}_d =
--\frac{1}{2}
-\rho
-C_d(M)
-A
-\|\mathbf{v}_{ax}\|^2
-\hat{\mathbf{v}}
-```
-
-Where:
-- `ρ` — air density
-- `A` — bullet cross-sectional area
-- `Cd(M)` — Mach-dependent drag coefficient (using G7 tables*)
-
-*Note: G7 tables provide more accurate long-range trajectory predictions for modern boat-tail bullets because their reference model more closely mimics the aerodynamic drag characteristics of sleek, high-velocity projectiles.*
-
----
-
-### Cross-Flow Side Force (Yaw-of-Repose Proxy)
-
-Approximates aerodynamic side force due to crosswind:
-
-```math
-\mathbf{F}_{side} =
-\frac{1}{2}
-\rho
-C_L
-A
-\|\mathbf{v}_n\|^2
-\hat{\mathbf{v}}_n
-```
-
-Typical values:
-- `C_L ≈ 0.01–0.03`
-
----
-
-### Spin-Induced Magnus Lift
-
-Spin axis is approximated as the velocity direction:
-
-```math
-\hat{\mathbf{s}} \approx \hat{\mathbf{v}}
-```
-
-Magnus direction:
-
-```math
-\hat{\mathbf{m}} =
-\frac{\hat{\mathbf{s}} \times \mathbf{v}_{rel}}
-{\|\hat{\mathbf{s}} \times \mathbf{v}_{rel}\|}
-```
-
-Force:
-
-```math
-\mathbf{F}_m =
-C_m
-\rho
-A
-\|\mathbf{v}_{rel}\|
-\omega
-\hat{\mathbf{m}}
-```
-
-Where:
-- `ω` — spin rate (rad/s)
-- `C_m ≈ 1e-4 – 5e-4`
-
-This produces realistic **spin drift** without modeling full orientation dynamics.
-
-*Note: Magnus force arises from circulation of airflow around a spinning body. It is caused by surface tangential velocity from spin interacting with bulk flow velocity. The Magnus effect is the same physics that makes a baseball curve, a soccer ball “bend,” or a tennis ball spin off course.*
-
----
-
-### Coriolis Effect
-
-```math
-\mathbf{a}_c = 2(\mathbf{v} \times \boldsymbol{\Omega}_{earth})
-```
-
-*Note: The Coriolis effect is an apparent sideways deflection of a moving object caused by the Earth’s rotation, included in long-range ballistics because it slightly shifts a bullet’s impact point over hundreds or thousands of yards.*
-
----
-
-### Total Acceleration
-
-```math
-\mathbf{a} =
-\frac{
-\mathbf{F}_g +
-\mathbf{F}_d +
-\mathbf{F}_{side} +
-\mathbf{F}_m
-}{m}
-+ \mathbf{a}_c
-```
-
----
-
-## Numerical Integration
-
-- **Integrator:** 4th-order Runge–Kutta (RK4)
-- **Timestep:** 0.5–2.0 ms (configurable)
-
----
-
 ## Data-Driven Models
 
 ### Simulation Object (bullet) Definition / Inputs
@@ -251,11 +68,6 @@ This produces realistic **spin drift** without modeling full orientation dynamic
 - Rifling twist rate
 - Muzzle velocity
 
-Spin rate:
-
-```math
-\omega = \frac{2\pi\,v_{muzzle}}{\text{twist}}
-```
 
 ---
 
@@ -293,9 +105,61 @@ If simulated DOPE matches known tables within a few percent, the model is consid
 
 ---
 
-## Project Structure (Proposed)
+## State Estimation
 
-*TBD*
+A critical function of any good ballistics simulator is to maintain an accurate representation of the gun's position and orientation in space over time.
+
+### High-Level Idea
+A high-precision 6-DOF tracking system for a standalone VR rifle scope attachment capable of resolving micro-adjustments (~0.1°) in orientation and producing reliable position and orientation estimates for long-range shooting simulation.
+
+### System Overview: Visual-Inertial State Estimator
+- IMUs provide high-rate inertial sensing
+	- Optional IMU array for noise/vibration suppression
+- Inclinometers provide tilt/roll absolute orientation
+- 1-2 cameras provide absolute drift correction
+- Error-State Extended Kalman Filter (ES-EKF)
+- Balance latency, accuracy, and compute cost by running each level at an appropriate rate
+
+## Sensors
+
+### IMUs
+- BNO085 - Current candidate IMU
+- Gyroscope -> $\omega$ (rad/s) rotation rate in x, y, and z (body axes)
+	- Drives orientation propagation
+- Accelerometers -> a (m/s<sup>2</sup>) specific force (acceleration - gravity) in x, y, and z (body axes)
+	- Drives velocity and gravity alignment
+- Rate: 500-2000 Hz
+- Optional 4x4 array -> Reduces noise via averaging, rejects vibrations
+
+### Inclinometers
+- SCL3300-D01-PCB - Current candidate inclinometer ($0.0055^\circ$ resolution)
+- Provides absolute orientation about an axis normal to gravity, like a level
+- Roll and Pitch can be measured directly, caging the gyroscope orientation integration
+- Represents a possible candidate upgrade for a "tactical" grade system
+- Rate: 10-70 Hz
+
+### Cameras
+- Absolute pose constraints via feature tracking / optical flow
+- Relative pose between frames
+- Rate: 30-60 Hz
+- Do not propagate state, they only correct drift
+
+## Kalman Filter Schema
+
+The **Extended Kalman Filter (EKF)** is a recursive Bayesian estimator that fuses noisy sensor measurements to produce optimal state estimates. It operates in two phases:
+
+1. **Predict (Time Update)**: Propagate the state forward using a nonlinear motion model. The covariance grows due to process uncertainty.
+2. **Update (Measurement Update)**: Ingest a sensor measurement, compute the innovation (residual), and blend it with the prediction using the optimal Kalman gain. State and covariance are corrected.
+
+The **16-DOF quaternion-based state** tracks:
+- **Position** (3D): rifle pose in NED coordinates
+- **Velocity** (3D): linear rates
+- **Orientation** (4D): unit quaternion for robust 3D rotations
+- **Angular Rate** (3D): quaternion derivatives (rad/s)
+- **Accel Bias** (3D): IMU accelerometer bias, estimated and corrected
+
+Sensor measurements (GNSS, IMU, inclinometer) are nonlinearly combined via their measurement models and Jacobians. The EKF recursively minimizes estimation error subject to noise covariances, producing smooth, drift-free pose estimates suitable for ballistic computation.
+
 
 ---
 
