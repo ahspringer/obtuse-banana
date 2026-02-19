@@ -11,11 +11,13 @@ Example::
 """
 
 # re-export commonly used sensor classes from submodules
+
 from .IMU import (
     Accelerometer3Axis,
     Gyroscope3Axis,
     GyroscopeQuaternion,
-    Magnetometer3Axis
+    Magnetometer3Axis,
+    BNO085IMU
 )
 
 from .inclinometers import (
@@ -31,6 +33,7 @@ __all__ = [
     "Gyroscope3Axis",
     "GyroscopeQuaternion",
     "Magnetometer3Axis",
+    "BNO085IMU",
     # inclinometers
     "Inclinometer1Axis",
     "Inclinometer2Axis",

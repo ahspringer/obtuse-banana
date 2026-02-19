@@ -223,6 +223,94 @@ class GyroscopeQuaternion(BaseSensor):
         return self.rate_gyro
     
 
+# ===============================================================================
+# BNO085 IMU DIGITAL TWIN
+# ===============================================================================
+
+class BNO085IMU:
+    """
+    Simulates a realistic BNO085 IMU (digital twin).
+    Provides 3-axis accelerometer and quaternion gyroscope outputs with realistic noise, bias, and accuracy.
+    Specs:
+        - Accel noise density: 120 µg/√Hz (0.000120 g/√Hz ≈ 0.001177 m/s^2/√Hz)
+        - Gyro noise density: 0.015 °/s/√Hz (≈ 0.0002618 rad/s/√Hz)
+        - Accel bias (in-run): 0.5 mg (0.004905 m/s^2)
+        - Gyro bias (in-run): 1–3 °/hr (0.0002909–0.0008727 rad/s)
+        - Quaternion accuracy (dynamic): 3.5° RMS
+    """
+    def __init__(self, seed: int = None, buffer_size: int = 100):
+        # Accel noise and bias
+        accel_noise_std = np.ones(3) * 0.001177  # m/s^2/√Hz
+        accel_bias = np.ones(3) * 0.004905      # m/s^2
+        # Gyro noise and bias
+        gyro_noise_std = np.ones(3) * 0.0002618  # rad/s/√Hz
+        # Pick a random bias in the 1–3 deg/hr range for each axis
+        rng = np.random.default_rng(seed)
+        gyro_bias = rng.uniform(0.0002909, 0.0008727, 3)  # rad/s
+        # Quaternion accuracy (dynamic): 3.5° RMS (used as output noise)
+        quat_noise_std = np.deg2rad(3.5) / np.sqrt(3)  # distribute RMS over 3 axes
+
+        # Create sensors using the framework
+        from .sensor_framework import SensorSpec
+        self.accel = Accelerometer3Axis(
+            sensor_id="bno085_accel",
+            initial_bias=accel_bias,
+            white_noise_std=accel_noise_std,
+            buffer_size=buffer_size,
+            seed=seed
+        )
+        self.gyro_quat = GyroscopeQuaternion(
+            sensor_id="bno085_gyro_quat",
+            initial_quaternion=[1.0, 0.0, 0.0, 0.0],
+            quaternion_noise_std=quat_noise_std,
+            initial_bias=gyro_bias,
+            white_noise_std=gyro_noise_std,
+            buffer_size=buffer_size,
+            seed=seed
+        )
+        self.rng = rng
+
+    def step(self, accel_cg_nav, omega_body, alpha_body, dcm_body_to_nav, gravity_nav, dt, timestamp):
+        """
+        Simulate one time step of the IMU.
+        Args:
+            accel_cg_nav: True acceleration at CG in navigation frame (3,)
+            omega_body: True angular velocity in body frame (3,)
+            alpha_body: True angular acceleration in body frame (3,)
+            dcm_body_to_nav: DCM from body to navigation frame (3x3)
+            gravity_nav: Gravity vector in navigation frame (3,)
+            dt: Time step (s)
+            timestamp: Current time (s)
+        Returns:
+            accel_meas: Measured acceleration (3,)
+            quat_meas: Measured orientation quaternion (4,)
+        """
+        # Simulate accelerometer (with lever arm = 0)
+        accel_true = self.accel.compute_specific_force(
+            accel_cg_nav, omega_body, alpha_body, dcm_body_to_nav, gravity_nav
+        )
+        accel_meas = self.accel.step(accel_true, dt, timestamp)
+
+        # Simulate gyroscope quaternion
+        quat_meas = self.gyro_quat.step_from_rates(omega_body, dt, timestamp)
+
+        return accel_meas, quat_meas
+
+    def get_latest(self):
+        """Return the latest sensor readings as a dict."""
+        return {
+            'accel': self.accel.get_latest(),
+            'quat': self.gyro_quat.get_latest()
+        }
+
+    def get_history(self):
+        """Return the full history of sensor readings as a dict."""
+        return {
+            'accel': self.accel.get_history_with_timestamps(),
+            'quat': self.gyro_quat.get_history_with_timestamps()
+        }
+
+
 if __name__ == "__main__":
     import unittest
     from ..util.angles import dcm_from_euler, euler_from_dcm, quaternion_to_rotation_matrix
