@@ -22,7 +22,8 @@ from .IMU import (
 
 from .inclinometers import (
     Inclinometer1Axis,
-    Inclinometer2Axis
+    Inclinometer2Axis,
+    SCL3300D02DigitalTwin
 )
 
 from .GNSS import GNSSReceiver
@@ -37,6 +38,7 @@ __all__ = [
     # inclinometers
     "Inclinometer1Axis",
     "Inclinometer2Axis",
+    "SCL3300D02DigitalTwin",
     # GNSS receiver
     "GNSSReceiver"
 ]

@@ -32,7 +32,8 @@ from src.filters import (
     adapt_inclinometer_sensor,
     quaternion_to_euler,
 )
-from src.sensors import Accelerometer3Axis, Inclinometer2Axis
+from src.sensors.IMU import BNO085IMU
+from src.sensors import SCL3300D02DigitalTwin
 
 SAVE_DIR = Path(r".\examples\images")
 SAVE_DIR.mkdir(exist_ok=True)
@@ -74,16 +75,16 @@ def setup_sensor_adapters():
     """Create sensor adapters for the EKF."""
     print("[3/5] Setting up sensor adapters")
     
-    # Accelerometer (3-axis)
-    accel = Accelerometer3Axis()
-    accel_adapter = adapt_accel_sensor(accel)
-    print(f"     [OK] Accelerometer adapter created (dim={accel_adapter.m_dim})")
-    
-    # Inclinometer (2-axis: pitch + roll)
-    inclin = Inclinometer2Axis()
+    # Use BNO085 IMU digital twin for error characteristics
+    bno085_imu = BNO085IMU(seed=42)
+    accel_adapter = adapt_accel_sensor(bno085_imu.accel)
+    print(f"     [OK] Accelerometer adapter created (dim={accel_adapter.m_dim}) [BNO085]")
+
+    # Inclinometer (2-axis: pitch + roll) using SCL3300D02 digital twin
+    inclin = SCL3300D02DigitalTwin(seed=42)
     inclin_adapter = adapt_inclinometer_sensor(inclin)
-    print(f"     [OK] Inclinometer adapter created (dim={inclin_adapter.m_dim})")
-    
+    print(f"     [OK] Inclinometer adapter created (dim={inclin_adapter.m_dim}) [SCL3300D02]")
+
     return {
         "accel": (accel_adapter, "accel_meas"),
         "inclin": (inclin_adapter, "inclin_meas"),

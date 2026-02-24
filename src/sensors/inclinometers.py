@@ -88,7 +88,58 @@ class Inclinometer2Axis(SimulatedSensor):
         
         true_angles = np.array([pitch, roll])
         return super().step(true_angles, dt, timestamp)
-    
+
+
+# ===============================================================================
+# SCL3300D02 Digital Twin Inclinometer
+# ===============================================================================
+
+
+# ===============================================================================
+# SCL3300D02 Digital Twin 2-Axis Inclinometer
+# ===============================================================================
+class SCL3300D02DigitalTwin(SimulatedSensor):
+    """
+    Digital twin for the SCL3300D02 2-axis inclinometer.
+    Simulates realistic noise, bias, and thermal drift for pitch and roll.
+    Specs:
+        - Noise density: 6 µg/√Hz (0.000006 g/√Hz ≈ 5.886e-5 m/s^2/√Hz)
+        - Initial offsets: ±2 mg (0.01962 m/s^2) for both axes
+        - Thermal drift: 0.1 mg/°C (0.000981 m/s^2/°C)
+    """
+    SPEC = SensorSpec(
+        dimension=2,
+        units="rad",
+        description="2-axis tilt angles (SCL3300D02 digital twin)",
+        labels=["pitch", "roll"]
+    )
+
+    def __init__(self, temp_C=25.0, temp_drift_C=0.0, seed=None, **kwargs):
+        super().__init__("scl3300d02_digital_twin", self.SPEC, **kwargs)
+        rng = np.random.default_rng(seed)
+        # Noise density (converted to std for 1 Hz bandwidth, in radians)
+        self.noise_std = np.ones(2) * np.radians(0.003)  # ~0.003 deg ≈ 5.24e-5 rad
+        # Initial offsets (bias) in radians (±2 mg/9.81)
+        self.bias = rng.uniform(-0.01962/9.81, 0.01962/9.81, 2)
+        # Thermal drift (per degree C, in radians)
+        self.thermal_drift_per_C = np.ones(2) * (0.000981/9.81)  # m/s^2/°C to rad/°C
+        self.temp_C = temp_C
+        self.temp_drift_C = temp_drift_C
+        self.rng = rng
+
+    def step_from_dcm(self, dcm_body_to_nav, dt, timestamp, temp_C=None):
+        if temp_C is not None:
+            self.temp_C = temp_C
+        # Extract pitch and roll from DCM
+        pitch = np.arctan2(-dcm_body_to_nav[2, 0], dcm_body_to_nav[2, 2])
+        roll = np.arctan2(dcm_body_to_nav[2, 1], dcm_body_to_nav[2, 2])
+        true_angles = np.array([pitch, roll])
+        # Add bias, thermal drift, and noise
+        thermal_offset = self.thermal_drift_per_C * (self.temp_C + self.temp_drift_C - 25.0)
+        noise = self.rng.normal(0, self.noise_std, 2)
+        measured = true_angles + self.bias + thermal_offset + noise
+        return measured
+
 
 if __name__ == "__main__":
     import unittest   

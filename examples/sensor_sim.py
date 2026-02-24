@@ -7,7 +7,8 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).parent.parent))  # Add project root to path
 
-from src.sensors import Accelerometer3Axis, GyroscopeQuaternion, Inclinometer2Axis
+from src.sensors.IMU import BNO085IMU
+from src.sensors import SCL3300D02DigitalTwin
 from src.util import dcm_from_euler, quat_from_dcm, euler_from_dcm
 
 """
@@ -28,27 +29,12 @@ DATA_DIR.mkdir(exist_ok=True)
 
 
 def sensor_data_sim():
-    # Initialize sensors
-    accel = Accelerometer3Axis(
-        sensor_id="accel_main",
-        white_noise_std=np.array([0.02, 0.02, 0.02]),
-        initial_bias=np.array([0.03, -0.02, 0.01]),
-        seed=42
-    )
 
-    gyro_quat = GyroscopeQuaternion(
-        sensor_id="gyro_quat",
-        initial_quaternion=[1.0, 0.0, 0.0, 0.0],
-        white_noise_std=np.array([0.001, 0.001, 0.001]),
-        quaternion_noise_std=0.01,
-        seed=42
-    )
+    # Initialize BNO085 IMU digital twin
+    bno085_imu = BNO085IMU(seed=42)
 
-    inclin = Inclinometer2Axis(
-        sensor_id="inclinometer",
-        white_noise_std=np.array([0.02, 0.02]),
-        seed=42
-    )
+    # Use SCL3300D02 digital twin inclinometer
+    inclin = SCL3300D02DigitalTwin(seed=42)
 
     # Simulation parameters
     dt = 1/400  # 400 Hz
@@ -106,14 +92,15 @@ def sensor_data_sim():
         # Gravity vector in the global frame (+Z is down, so gravity points in +Z direction)
         gravity_ned = np.array([0.0, 0.0, 9.81])
         
-        # Compute specific force (what accelerometer measures before noise)
-        accel_truth = accel.compute_specific_force(acceleration_body, omega, alpha, dcm, gravity_ned)
+
+        # Use BNO085 IMU digital twin for accel/gyro
+        accel_meas, quat_meas = bno085_imu.step(acceleration_body, omega, alpha, dcm, gravity_ned, dt, t)
+        # For true values, use the same as before (static, gravity only)
+        accel_truth = bno085_imu.accel.compute_specific_force(acceleration_body, omega, alpha, dcm, gravity_ned)
         accel_true[i] = accel_truth
-        
-        # Measure with IMU sensors
-        accel_measured[i] = accel.step_with_frame(accel_truth, dt, t)
-        quat_measured[i] = gyro_quat.step_from_rates(omega, dt, t)
-        
+        accel_measured[i] = accel_meas
+        quat_measured[i] = quat_meas
+
         # Inclinometer measures pitch and roll from DCM (sensor returns [pitch, roll])
         inclin_measured[i] = inclin.step_from_dcm(dcm, dt, t)
 
